@@ -49,18 +49,36 @@ ls "D:/AutoCAD 2021/accoreconsole.exe"     # 路径按实际安装位置改
 python scripts/extract.py "$JOB/source.pdf" -o "$JOB/extract.json"
 ```
 
-输出全部矢量路径、文字 span、以及**光栅颜色直方图**（独立佐证，不依赖路径元数据）。
-看输出的"颜色组合统计"确认配色语义，特别是哪几种颜色承担什么角色。
+输出全部矢量路径、文字 span、**光栅颜色直方图**（独立佐证，不依赖路径元数据）、
+以及**虚线图案表**。
+
+看三样东西：
+
+1. **颜色组合统计**——哪几种颜色承担什么角色；
+2. **linetype 表**——源图有几种虚线、各自的划线/间隔长度。生成器按这张表定义
+   真 DXF linetype，所以这里为空就说明源图全是实线；
+3. **"colours outside the six named source colours"**——出现这一段说明这张图不是
+   六饱和色图纸。脚本会把它们写成**真彩色**（group code 420），不再替换成黑色或
+   邻近色。
 
 ### 2. 推断活标注（`infer_dims.py`）
 
 ```bash
-python scripts/infer_dims.py "$JOB/extract.json" -o "$JOB/dims.json"
+python scripts/infer_dims.py "$JOB/extract.json" -o "$JOB/dims.json" \
+    [--config cad-reproduce.yaml] [--colour green]
 ```
 
-从源图**画出来的**尺寸几何反推标注意图。**先看颜色角色**——本流程实测过
-红色是中心线、**绿色才是尺寸线/界线**，与直觉相反。若颜色角色不同，
-改 `infer_dims.collect_segments` 的 `colour` 参数。
+从源图**画出来的**尺寸几何反推标注意图。脚本会**自动检测**"哪种颜色承担尺寸线"
+并打印证据表（箭头数、被界线夹住的尺寸线数、同色数字标签数）。
+
+- 检测与你要的一致 → 继续；
+- 检测说"无法从几何区分角色"（单色图纸常见）→ 按提示把答案写进
+  `cad-reproduce.yaml` 的 `dimensions.colour`，或直接 `--colour X`；
+- 你要的角色不对 → **退出码 2 并报错**，不会静默返回 0 个标注。
+
+本流程实测过红色是中心线、**绿色才是尺寸线/界线**，与直觉相反。所有阈值（字高、
+箭头签名、共线容差…）都在 yaml 的 `dimensions:` 块里，是**实测值**，换图改配置即可，
+不用改代码。
 
 看输出的置信度分布：**只保留 high/medium**，low 的丢弃（宁缺勿错）。
 
@@ -81,11 +99,19 @@ python scripts/stage1_build.py "$JOB/extract.json" "$JOB/dims.json" \
 python scripts/trace.py "$JOB/extract.json" --dims "$JOB/dims.json" \
     --out-dir "$JOB/trace" --dpi 300
 python scripts/compare.py "$JOB/trace/trace_source.png" "$JOB/trace/trace_generated.png" \
-    -o "$JOB/out" --dpi 300 --json "$JOB/cmp.json"
+    -o "$JOB/out" --dpi 300 --json "$JOB/cmp.json" --extract "$JOB/extract.json"
 ```
 
 门禁判三项：**几何一致率 ≥97%**、**每色份额差 ≤3%**、**每色位置 IoU ≥0.70**。
 不通过就**不要交付**，看差异图定位。
+
+`--extract` 把颜色分类的调色板换成**源图自己的颜色**。不加它，源图里六色之外的
+颜色会被归到最近的邻近色，颜色判据衡量的是调色板而不是图纸。
+
+**门禁抓不到什么**：源侧影像是从 `extract.json` 自己画的，且实心判据在
+`trace.py` 与 `stage1_build.py` 里是同一套规则的两份拷贝——**规则本身错了，
+两边会一起错，一致率照样漂亮**。它只能证明"生成器没有漏画或错位"，不能证明
+"抽取与判读是对的"。所以新图纸上至少要有一次人工/AutoCAD 出图的对照。
 
 ### 5. AutoCAD 权威验收（`accad.py`）
 
@@ -126,10 +152,27 @@ $JOB/
   确实需要换行才用 `--mtext`，并用 AutoCAD 出图验证。
 - **多页 PDF 只取第 1 页**（`extract.py` 会警告）。多页作业需要扩展。
 - **位图源图不支持**：本流程依赖 PDF 的矢量数据。
+- **尺寸只认水平/垂直的线性标注**。斜向尺寸、角度、半径/直径标注目前推断不出来。
+- **DXF 的样条曲线不能带线型**：虚线圆弧会保留几何但丢掉虚线，`build.json` 里
+  记在 `dashed_curve_not_dashed` 名下。
+- **只有一张参考图纸被验证过**。上面每个"实测"数字都来自同一张《蓄热式燃烧器安装图》。
+  换图纸时把它当成**起点**而不是结论，先跑 `extract.py` 看颜色角色与虚线表，再决定
+  要不要改 `cad-reproduce.yaml`。
 
 **所有判定参数都必须实测，不要凭感觉。** 本流程实测过的两个教训：
 箭头尺寸写成 2.5pt 而源图是 5.4pt（所有箭头只有一半大）；
 尺寸文字间距写成 2.75pt 而源图实测中心偏移 3.25pt（数字偏离约自身字高的 1/4）。
+
+## 回归测试
+
+```bash
+python evals/test_regressions.py
+```
+
+造两张最小 PDF（含虚线与六色外的颜色 / 含一条尺寸链），跑完整流水线并断言：
+虚线变成真 linetype 且长度按毫米换算正确、六色外的颜色写成真彩色而不是黑、
+错误的颜色角色退出码 2。这四项都是**门禁看不见**的历史缺陷，所以单独有测试。
+
 
 ## 什么时候该请视觉模型帮忙
 

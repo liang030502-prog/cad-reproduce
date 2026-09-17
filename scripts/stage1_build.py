@@ -375,12 +375,9 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
                                    close=True, dxfattribs=attr)
                 counts["quad"] += 1
             elif kind == "c":
-                bez = Bezier([(X(px), Y(py)) for px, py in item[1:5]])
-                spline_attr = {k: v for k, v in attr.items() if k != "linetype"}
-                if "linetype" in attr:
-                    counts["dashed_curve_not_dashed"] += 1
-                msp.add_open_spline(bez.control_points, degree=3, dxfattribs=spline_attr)
-                counts["curve"] += 1
+                # Handled after this loop: a curve has to be judged as part of a RUN
+                # of curves, not item by item.  See the curve block below.
+                pass
             else:
                 counts[f"skipped:{kind}"] += 1
 
@@ -414,7 +411,15 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
                 prev_was_curve = False
 
         for cubics in curve_runs:
+            before_spline = counts.get("curve_spline", 0)
             curve_entities.emit_curves(msp, cubics, attr, X, Y, scale, counts)
+            # A spline is the one DXF entity that cannot carry a linetype, so a
+            # dashed curve drawn as a spline loses its dashes.  An ARC or CIRCLE
+            # carries one fine, so recognising the arc actually RECOVERS the dashes;
+            # the loss is only counted for the runs that had to stay splines.
+            if "linetype" in attr:
+                counts["dashed_curve_not_dashed"] += (
+                    counts.get("curve_spline", 0) - before_spline)
 
     # ---- live dimensions -------------------------------------------------
     # `associative` decides where the number comes from, and the choice is forced by

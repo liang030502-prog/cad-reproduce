@@ -40,8 +40,8 @@ Get-ItemProperty 'HKLM:\SOFTWARE\Autodesk\AutoCAD\R24.0\ACAD-4101:804' |
 ## 2. 快速开始（把 `$JOB` 换成你的作业目录）
 
 ```powershell
-$SK  = 'C:\Users\thirt\.dsh\skills\cad-reproduce\scripts'
-$JOB = 'D:\CAD作业\jobs\<作业名>'
+$SK  = '<skill 目录>\scripts'
+$JOB = '<作业目录>'
 $env:PYTHONIOENCODING = 'utf-8'      # 必需，否则中文输出会乱码
 New-Item -ItemType Directory -Force $JOB | Out-Null
 Copy-Item '<你的图纸>.pdf' "$JOB\source.pdf"

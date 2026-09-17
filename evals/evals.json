@@ -10,7 +10,7 @@
     },
     {
       "id": "t02",
-      "prompt": "把 蓄热式燃烧器安装图.pdf 复刻成 DXF",
+      "prompt": "把 装配图.pdf 复刻成 DXF",
       "should_trigger": true,
       "why": "复刻 + 明确的输出格式"
     },

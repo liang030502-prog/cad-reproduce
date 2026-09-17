@@ -49,7 +49,7 @@ Copy-Item '<你的图纸>.pdf' "$JOB\source.pdf"
 # 1 抽取
 python "$SK\extract.py" "$JOB\source.pdf" -o "$JOB\extract.json"
 
-# 2 推断活标注（先看输出的"颜色组合统计"，确认颜色角色）
+# 2 推断活标注（脚本会检测"哪种颜色是尺寸线"；角色不对会报错，不会静默返回 0 个）
 python "$SK\infer_dims.py" "$JOB\extract.json" -o "$JOB\dims.json"
 
 # 3 生成
@@ -60,8 +60,9 @@ python "$SK\stage1_build.py" "$JOB\extract.json" "$JOB\dims.json" `
 python "$SK\trace.py" "$JOB\extract.json" --dims "$JOB\dims.json" `
     --out-dir "$JOB\trace" --dpi 300
 python "$SK\compare.py" "$JOB\trace\trace_source.png" "$JOB\trace\trace_generated.png" `
-    -o "$JOB\out" --dpi 300 --json "$JOB\cmp.json"
-# 退出码 0 = 通过
+    -o "$JOB\out" --dpi 300 --json "$JOB\cmp.json" --extract "$JOB\extract.json"
+# 退出码 0 = 通过；--extract 让配色判据用源图自己的调色板
+# （不加它，六色之外的源图颜色会被归到邻近色，判据衡量的是调色板而不是图纸）
 
 # 5 AutoCAD 权威验收（可跳过）
 python "$SK\accad.py" "$JOB\repro.dxf" -o "$JOB\acad" `
@@ -77,11 +78,31 @@ python "$SK\accad.py" "$JOB\repro.dxf" -o "$JOB\acad" `
 
 | 步 | 脚本 | 输出 | 必须看的 |
 |---|---|---|---|
-| 1 | `extract.py` | `extract.json` | "颜色组合统计"——**确认每种颜色承担什么角色**（红可能是中心线不是尺寸线） |
-| 2 | `infer_dims.py` | `dims.json` | 置信度分布；**只保留 high/medium** |
-| 3 | `stage1_build.py` | `repro.dxf` + `build.json` | `dimensions_emitted`、`fonts_resolved`、`suppressed` |
-| 4 | `trace.py`+`compare.py` | `trace/*.png` `out/cmp_*.png` | 三项判据 + 差异图 |
+| 1 | `extract.py` | `extract.json` | "颜色组合统计"、**linetype 表**（虚线图案）、`colours_outside_named_set`——确认每种颜色承担什么角色、有哪些虚线 |
+| 2 | `infer_dims.py` | `dims.json` | **颜色角色检测结论**（不成立会退出码 2）＋置信度分布；**只保留 high/medium** |
+| 3 | `stage1_build.py` | `repro.dxf` + `build.json` | `dimensions_emitted`、`fonts_resolved`、`suppressed`、`linetypes.defined` |
+| 4 | `trace.py`+`compare.py` | `trace/*.png` `out/cmp_*.png` | 三项判据 + 差异图；**注意门禁的能力边界（见下）** |
 | 5 | `accad.py` | `.dwg`、`_export.pdf`、审计 | 实体数、`extents`、**PDF 字体不是替换字体** |
+
+### 门禁能证明什么、不能证明什么
+
+能：生成器**没有漏画、没有错位**（像素级，带 0.12mm 容差）。
+
+**不能**：抽取与判读本身是否正确。源侧影像是拿 `extract.json` 自己画的，
+实心判据在 `trace.py` 与 `stage1_build.py` 里是同一套规则的两份拷贝——
+**规则错了两边一起错，一致率照样 0.98 PASS**。
+所以换新图纸时，门禁通过不等于图纸对，必须另做一次独立对照
+（AutoCAD `--export` 出图、人工确认颜色角色与虚线表）。
+
+### 回归测试
+
+```powershell
+python evals\test_regressions.py     # 全部通过 = 退出码 0
+```
+
+造两张最小 PDF 跑通整条流水线，断言四类**门禁看不见**的历史缺陷不再复发：
+虚线进 DXF 成为真 linetype（长度按毫米换算正确）、六色外的颜色写真彩色而不是黑、
+错误的颜色角色退出码 2、追绘的尺寸用检测到的颜色。
 
 ### 门禁判据
 
@@ -94,6 +115,18 @@ python "$SK\accad.py" "$JOB\repro.dxf" -o "$JOB\acad" `
 ### 常用可选参数
 
 ```powershell
+# 推断：直接指定尺寸线的颜色（不确定时省略，脚本会检测并打印证据表）
+python "$SK\infer_dims.py" ... --colour green
+
+# 推断：这张图确实没有尺寸，接受空结果（否则空结果按失败处理，退出码 2）
+python "$SK\infer_dims.py" ... --allow-empty
+
+# 推断：从 yaml 读全部阈值（颜色角色 / 字高 / 箭头签名 / 容差）
+python "$SK\infer_dims.py" ... --config "$SK\..\cad-reproduce.yaml"
+
+# 门禁：用源图自己的调色板做颜色分类（六色之外的图纸必须加）
+python "$SK\compare.py" ... --extract "$JOB\extract.json"
+
 # 生成：把标注交给 CAD 自动测量（仅当图纸几何与数字自洽时才用）
 python "$SK\stage1_build.py" ... --associative
 
@@ -222,8 +255,11 @@ $JOB/
 
 ## 6. 卡住了先看
 
-- `references/PITFALLS.md` —— **37 条实测坑**，按 AutoCAD 无头调用 / ezdxf / 几何语义 /
-  验证尺子 / 环境 分类。九成问题在这里有答案。
-- `references/PIPELINE.md` —— 每步完整调用、判据、以及**按症状查的排错对照表**。
+- `references/PITFALLS.md` —— **44 条实测坑**，按 AutoCAD 无头调用 / ezdxf / 几何语义 /
+  验证尺子 / 环境 / **门禁看不见的缺陷** 分类。九成问题在这里有答案。
+  第 38–44 条是"流水线不报错、成品是错的、门禁还给绿灯"的那一类，换图纸时最值得先读。
+- `references/PIPELINE.md` —— 每步完整调用、判据、**门禁的能力边界**、
+  以及按症状查的排错对照表。
+- `evals/test_regressions.py` —— 四类历史缺陷的回归测试，改动脚本后先跑它。
 - `HANDOFF.md` —— 这套流程是怎么一步步试出来的，含所有"我错了然后被工具纠正"的记录。
   想知道某个设计决策为什么是这样，看这里。

@@ -99,6 +99,8 @@ def extract(source: str, dpi: int = 150, max_paths: int | None = None) -> dict:
         ys += [s["bbox"][1], s["bbox"][3]]
     content_extent = [min(xs), min(ys), max(xs), max(ys)]
 
+    linetypes = _linetypes(paths)
+
     data = {
         "source": os.path.abspath(source),
         "page": {"width_pt": round(page.rect.width, 4),
@@ -107,15 +109,60 @@ def extract(source: str, dpi: int = 150, max_paths: int | None = None) -> dict:
         "content_extent_pt": [round(v, 4) for v in content_extent],
         "spans": spans,
         "paths": paths,
+        "linetypes": linetypes,
         "stats": {
             "path_count": len(paths),
             "span_count": len(spans),
             "colour_combo_counts": _combo_counts(paths),
             "width_counts": dict(collections.Counter(p["width"] for p in paths)),
+            "dashed_paths": sum(n for k, n in linetypes["counts"].items()
+                                if k != "continuous"),
+            "linetype_counts": linetypes["counts"],
+            "colours_outside_named_set": _unnamed_colours(paths, spans),
         },
     }
-    data["raster"] = raster_histogram(page, dpi=dpi)
+    data["raster"] = raster_histogram(page, dpi=dpi, data=data)
     return data
+
+
+def _linetypes(paths) -> dict:
+    """Every distinct dash pattern in the source, named and measured.
+
+    This block is what makes dashes survive into the DXF.  An earlier version read
+    the PDF dash array and then never used it, so every centre line, hidden line and
+    section boundary was reproduced as a solid line - and the self-check could not
+    see it, because the ruler rasterised both sides with the same dashed-or-not
+    blindness.
+    """
+    patterns = {}
+    for p in paths:
+        pat = cadkit.dash_pattern(p.get("dashes"))
+        key = cadkit.dash_linetype_name(pat)
+        entry = patterns.setdefault(key, {"pattern_pt": list(pat), "paths": 0,
+                                          "example_path": p["i"]})
+        entry["paths"] += 1
+    counts = {k: v["paths"] for k, v in sorted(patterns.items())}
+    return {"patterns": patterns, "counts": counts}
+
+
+def _unnamed_colours(paths, spans) -> dict:
+    """Colours that are not one of the six named source colours.
+
+    Reported rather than swallowed.  These are written as true colours now, but a
+    reader still needs to know that the sheet is not the six-colour kind, because
+    that is what decides whether the dimension machinery can be recognised (see
+    infer_dims) and whether the ACI layer scheme applies.
+    """
+    out = collections.Counter()
+    for p in paths:
+        for key in (p["color"], p["fill"]):
+            if key and key.startswith("#"):
+                out[key] += 1
+    for s in spans:
+        key = cadkit.hex_string_to_key(s["color"])   # named colour, or #RRGGBB
+        if key and key.startswith("#"):
+            out[key] += 1
+    return dict(out.most_common())
 
 
 def _pt(p) -> list:
@@ -135,7 +182,8 @@ def _combo_counts(paths) -> dict:
     return dict(counter.most_common())
 
 
-def raster_histogram(page, dpi: int = 150, max_pixels: int = 40_000_000) -> dict:
+def raster_histogram(page, dpi: int = 150, max_pixels: int = 40_000_000,
+                     data: dict | None = None) -> dict:
     """Measure which colours the source actually puts on paper.
 
     This is the independent second opinion on colour.  Path metadata can be
@@ -153,12 +201,17 @@ def raster_histogram(page, dpi: int = 150, max_pixels: int = 40_000_000) -> dict
     pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
     arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, :3]
 
-    shares, ink = cadkit.family_shares(arr)
+    # The palette is the drawing's own colours, not a fixed eight.  Classifying a
+    # sheet drawn in #1E90FF against the default palette would report it as "blue"
+    # and make every share below a statement about the palette instead of the sheet.
+    palette = cadkit.raster_palette(data) if data else None
+    shares, ink = cadkit.family_shares(arr, palette)
     return {
         "dpi": dpi,
         "size_px": [pix.width, pix.height],
         "ink_pixels": ink,
         "colour_share": shares,
+        "palette": [name for name, _rgb in palette] if palette else list(cadkit.RASTER_FAMILIES),
     }
 
 
@@ -181,14 +234,25 @@ def main() -> int:
          ("content extent (pt)", " ".join(f"{v:.2f}" for v in data["content_extent_pt"])),
          ("paths", data["stats"]["path_count"]),
          ("text spans", data["stats"]["span_count"]),
+         ("dashed paths", data["stats"]["dashed_paths"]),
          ("raster ink pixels", data["raster"]["ink_pixels"])],
         ("measurement", "value"))
     print()
     cadkit.table([(k, v) for k, v in data["stats"]["colour_combo_counts"].items()],
                  ("stroke / fill / width combination", "paths"))
     print()
+    cadkit.table([(k if k != "continuous" else "(solid)", v)
+                  for k, v in data["stats"]["linetype_counts"].items()],
+                 ("linetype (dash pattern, points)", "paths"))
+    print()
     cadkit.table([(k, v) for k, v in data["raster"]["colour_share"].items()],
                  ("rendered colour", "share of ink"))
+    if data["stats"]["colours_outside_named_set"]:
+        print()
+        print("colours outside the six named source colours (written as true colour,"
+              " not substituted):")
+        for k, v in data["stats"]["colours_outside_named_set"].items():
+            print(f"  {k}  {v} paths/spans")
     print(f"\nwrote {args.out}")
     return 0
 

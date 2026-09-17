@@ -33,6 +33,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cadkit  # noqa: E402
 
 PAPER = (255, 255, 255)
+# The named source colours.  A drawing may also contain colours outside this set;
+# those are looked up from the extraction (see build_rgb), never substituted, so a
+# blue line is rasterised blue rather than as the nearest named colour.
 RGB = {
     "black": (0, 0, 0),
     "red": (255, 0, 0),
@@ -40,7 +43,30 @@ RGB = {
     "green": (0, 255, 0),
     "cyan": (0, 255, 255),
     "magenta": (255, 0, 255),
+    "blue": (0, 0, 255),
 }
+
+
+def build_rgb(data: dict, extra=()) -> dict:
+    """Colour key -> RGB for every colour this drawing actually contains."""
+    table = dict(RGB)
+    for key in list(extra):
+        rgb = cadkit.key_to_rgb(key)
+        if rgb is not None:
+            table[key] = rgb
+    for p in data.get("paths", ()):
+        for key in (p.get("color"), p.get("fill")):
+            if key and key not in table:
+                rgb = cadkit.key_to_rgb(key)
+                if rgb is not None:
+                    table[key] = rgb
+    for s in data.get("spans", ()):
+        key = s.get("color")
+        if key and key not in table:
+            rgb = cadkit.key_to_rgb(key)
+            if rgb is not None:
+                table[key] = rgb
+    return table
 
 # Supersampling factor.  The source PDF is anti-aliased, so a hard-edged raster of
 # the reproduction would disagree along every edge for a reason that has nothing to
@@ -52,17 +78,23 @@ SUPERSAMPLE = 2
 class Tracer:
     """Draws geometry into a pixel grid defined by a source-point window."""
 
-    def __init__(self, window_pt, dpi: int, origin_pt):
+    def __init__(self, window_pt, dpi: int, origin_pt, rgb_table=None):
         """`window_pt` is (x0, y0, x1, y1) in source points, y downward.
 
         `origin_pt` is the point that maps to (0, 0) in the same space the
         coordinates are given in, so a caller can draw the source and the
         reproduction through one identity mapping.
+
+        `rgb_table` is the colour key -> RGB map for a drawing with colours beyond
+        the named ones (see build_rgb).
         """
         from PIL import Image
         self.dpi = dpi
         self.origin = origin_pt
         self.window = window_pt
+        self.rgb = dict(RGB)
+        if rgb_table:
+            self.rgb.update(rgb_table)
         scale = dpi / 72.0
         w = int(round((window_pt[2] - window_pt[0]) * scale)) * SUPERSAMPLE
         h = int(round((window_pt[3] - window_pt[1]) * scale)) * SUPERSAMPLE
@@ -71,7 +103,20 @@ class Tracer:
         self.scale = scale * SUPERSAMPLE
         self.image = Image.new("RGB", (w, h), PAPER)
         self.size_px = (w, h)
-        self.stats = {"line": 0, "circle": 0, "poly": 0, "curve": 0, "text": 0, "hatch": 0}
+        self.stats = {"line": 0, "circle": 0, "poly": 0, "curve": 0, "text": 0,
+                      "hatch": 0, "dashed_line": 0, "unknown_colour": 0}
+
+    # ---------------------------------------------------------------- colour
+    def colour(self, key):
+        """RGB for a colour key, falling back to black only for a key that is not
+        a colour at all (a path with neither stroke nor fill)."""
+        rgb = self.rgb.get(key)
+        if rgb is None:
+            rgb = cadkit.key_to_rgb(key)
+        if rgb is None:
+            self.stats["unknown_colour"] += 1
+            return (0, 0, 0)
+        return rgb
 
     # ---------------------------------------------------------------- mapping
     def to_px(self, x: float, y: float) -> tuple[float, float]:
@@ -84,32 +129,77 @@ class Tracer:
         """A physical width in millimetres -> pixels.  No cap, no policy."""
         return mm / 25.4 * self.dpi * SUPERSAMPLE
 
+    # ---------------------------------------------------------------- dashes
+    @staticmethod
+    def _dash_spans(total: float, pattern) -> list:
+        """[(start, end)] of the ink runs along a segment of length `total`.
+
+        `pattern` is the PDF/DXF dash array in millimetres: ink, gap, ink, gap...
+        The phase starts at zero on every segment, which is what a PDF viewer does,
+        so drawing the dashes here and letting AutoCAD draw the DXF linetype there
+        produces the same marks.  Without this the ruler could not see dashes at
+        all, and a drawing with every centre line wrongly solid passed the gate.
+        """
+        if not pattern or total <= 0:
+            return [(0.0, total)]
+        spans, pos, i = [], 0.0, 0
+        while pos < total:
+            length = pattern[i % len(pattern)]
+            i += 1
+            if length <= 0:
+                continue
+            if i % 2 == 1:                       # odd index => ink run
+                spans.append((pos, min(total, pos + length)))
+            pos += length
+        return spans
+
     # ---------------------------------------------------------------- primitives
-    def line(self, a, b, color, width_mm: float) -> None:
+    def line(self, a, b, color, width_mm: float, pattern=None) -> None:
         from PIL import ImageDraw
         d = ImageDraw.Draw(self.image)
         w = max(1, int(round(self.mm_to_px(width_mm))))
-        d.line([self.to_px(*a), self.to_px(*b)], fill=RGB[color], width=w)
-        self.stats["line"] += 1
+        rgb = self.colour(color)
+        if not pattern:
+            d.line([self.to_px(*a), self.to_px(*b)], fill=rgb, width=w)
+            self.stats["line"] += 1
+            return
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(dx, dy)
+        pat_mm = [v * cadkit.PT2MM for v in pattern]
+        for s, e in self._dash_spans(length * cadkit.PT2MM, pat_mm):
+            f0, f1 = s / (length * cadkit.PT2MM), e / (length * cadkit.PT2MM)
+            d.line([self.to_px(a[0] + dx * f0, a[1] + dy * f0),
+                    self.to_px(a[0] + dx * f1, a[1] + dy * f1)], fill=rgb, width=w)
+        self.stats["dashed_line"] += 1
 
-    def polyline(self, pts, color, width_mm: float, closed: bool = False) -> None:
+    def polyline(self, pts, color, width_mm: float, closed: bool = False,
+                 pattern=None) -> None:
         from PIL import ImageDraw
         if len(pts) < 2:
+            return
+        if pattern:
+            # Dash each edge independently; a closed shape restarts the pattern at
+            # every vertex, exactly as a PDF viewer draws a dashed closed path.
+            seq = list(pts) + ([pts[0]] if closed else [])
+            for a, b in zip(seq, seq[1:]):
+                self.line(a, b, color, width_mm, pattern=pattern)
             return
         d = ImageDraw.Draw(self.image)
         w = max(1, int(round(self.mm_to_px(width_mm))))
         seq = [self.to_px(*p) for p in pts]
         if closed:
             seq = seq + [seq[0]]
-        d.line(seq, fill=RGB[color], width=w, joint="curve")
+        d.line(seq, fill=self.colour(color), width=w, joint="curve")
         self.stats["poly"] += 1
 
     def bezier(self, p0, p1, p2, p3, color, width_mm: float,
-               steps: int = 24) -> None:
+               steps: int = 24, pattern=None) -> None:
         """Flatten a cubic to a polyline.
 
         A DXF spline is written from the same four control points, so flattening
-        here reproduces the curve without needing a spline evaluator.
+        here reproduces the curve without needing a spline evaluator.  A dashed
+        curve is dashed here even though DXF cannot dash a spline: this rasteriser
+        is the ruler, and a ruler that cannot see dashes cannot report their loss.
         """
         pts = []
         for i in range(steps + 1):
@@ -120,7 +210,7 @@ class Tracer:
             y = (u * u * u * p0[1] + 3 * u * u * t * p1[1]
                  + 3 * u * t * t * p2[1] + t * t * t * p3[1])
             pts.append((x, y))
-        self.polyline(pts, color, width_mm)
+        self.polyline(pts, color, width_mm, pattern=pattern)
         self.stats["curve"] += 1
 
     def disc(self, centre, radius_pt: float, color,
@@ -131,9 +221,9 @@ class Tracer:
         cx, cy = self.to_px(*centre)
         r = radius_pt * self.scale
         box = [cx - r, cy - r, cx + r, cy + r]
-        d.ellipse(box, fill=RGB[color])
+        d.ellipse(box, fill=self.colour(color))
         if outline_width_mm > 0:
-            d.ellipse(box, outline=RGB[color],
+            d.ellipse(box, outline=self.colour(color),
                       width=max(1, int(round(self.mm_to_px(outline_width_mm)))))
         self.stats["circle"] += 1
 
@@ -142,7 +232,7 @@ class Tracer:
         if len(pts) < 3:
             return
         d = ImageDraw.Draw(self.image)
-        d.polygon([self.to_px(*p) for p in pts], fill=RGB[color])
+        d.polygon([self.to_px(*p) for p in pts], fill=self.colour(color))
         self.stats["hatch"] += 1
 
     def dimension(self, axis: str, lo: float, hi: float, line_pos: float,
@@ -206,7 +296,7 @@ class Tracer:
     def _triangle(self, a, b, c, colour) -> None:
         from PIL import ImageDraw
         ImageDraw.Draw(self.image).polygon(
-            [self.to_px(*a), self.to_px(*b), self.to_px(*c)], fill=RGB[colour])
+            [self.to_px(*a), self.to_px(*b), self.to_px(*c)], fill=self.colour(colour))
 
     def text(self, s: str, origin, height_pt: float, color, rotation: float = 0.0,
              centre: bool = False):
@@ -220,14 +310,14 @@ class Tracer:
         d = ImageDraw.Draw(self.image)
         anchor = "ms" if centre else "ls"
         if abs(rotation) < 1e-6:
-            d.text(self.to_px(*origin), s, fill=RGB[color], font=font, anchor=anchor)
+            d.text(self.to_px(*origin), s, fill=self.colour(color), font=font, anchor=anchor)
         else:
             # Rotated text is drawn on its own tile and pasted, because PIL cannot
             # rotate text in place.
             bbox = d.textbbox((0, 0), s, font=font)
             tw, th = max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])
             tile = Image.new("RGBA", (tw + 4, th + 8), (0, 0, 0, 0))
-            ImageDraw.Draw(tile).text((2, 2), s, fill=RGB[color] + (255,), font=font)
+            ImageDraw.Draw(tile).text((2, 2), s, fill=self.colour(color) + (255,), font=font)
             tile = tile.rotate(rotation, expand=True, resample=Image.BICUBIC)
             self.image.paste(tile, (int(self.to_px(*origin)[0]),
                                     int(self.to_px(*origin)[1]) - tile.height), tile)
@@ -280,17 +370,18 @@ GLYPH_MAX_LONG = 6.5
 
 
 def trace_source(data: dict, out_png: str, dpi: int = 300,
-                 margin_pt: float = 6.0) -> dict:
+                 margin_pt: float = 6.0, dim_colour: str | None = None) -> dict:
     """Rasterise the SOURCE geometry from its extracted numbers."""
     extent = data["content_extent_pt"]
     window = (extent[0] - margin_pt, extent[1] - margin_pt,
               extent[2] + margin_pt, extent[3] + margin_pt)
-    t = Tracer(window, dpi, (0.0, 0.0))
+    t = Tracer(window, dpi, (0.0, 0.0), rgb_table=build_rgb(data, extra=[dim_colour]))
 
     for p in data["paths"]:
         colour = p["color"] or p["fill"] or "black"
         width_mm = (p["width"] or 0.0) * cadkit.PT2MM
         items = p["items"]
+        pattern = cadkit.dash_pattern(p.get("dashes"))
 
         # A path whose pen is wider than the shape itself prints as a solid mark.
         if _reads_as_solid(p):
@@ -300,15 +391,16 @@ def trace_source(data: dict, out_png: str, dpi: int = 300,
         for it in items:
             kind = it[0]
             if kind == "l":
-                t.line(it[1], it[2], colour, width_mm)
+                t.line(it[1], it[2], colour, width_mm, pattern=pattern)
             elif kind == "re":
                 x0, y0, x1, y1 = it[1]
                 t.polyline([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], colour,
-                           width_mm, closed=True)
+                           width_mm, closed=True, pattern=pattern)
             elif kind == "qu":
-                t.polyline(it[1], colour, width_mm, closed=True)
+                t.polyline(it[1], colour, width_mm, closed=True, pattern=pattern)
             elif kind == "c":
-                t.bezier(it[1], it[2], it[3], it[4], colour, width_mm)
+                t.bezier(it[1], it[2], it[3], it[4], colour, width_mm,
+                         pattern=pattern)
 
     for s in data["spans"]:
         if not s["text"].strip():
@@ -338,7 +430,8 @@ def trace_generated(data: dict, dims: dict, out_png: str, cfg: dict,
     extent = data["content_extent_pt"]
     window = (extent[0] - margin_pt, extent[1] - margin_pt,
               extent[2] + margin_pt, extent[3] + margin_pt)
-    t = Tracer(window, dpi, (0.0, 0.0))
+    dim_colour = dims.get("dimension_colour") or cfg.get("dim_colour") or "green"
+    t = Tracer(window, dpi, (0.0, 0.0), rgb_table=build_rgb(data, extra=[dim_colour]))
 
     from infer_dims import _is_glyph_path
     kept_dims = [p for p in dims["proposals"] if p["value"] is not None
@@ -375,6 +468,13 @@ def trace_generated(data: dict, dims: dict, out_png: str, cfg: dict,
             return all(in_band(px, py) for px, py in it[1:5])
         return False
 
+    # The linetype the generator will put on each path, mapped back to the pattern
+    # it came from.  Read from extract.json's own linetype table, so the trace and
+    # the DXF cannot disagree about which paths are dashed.
+    linetype_patterns = {name: tuple(spec.get("pattern_pt") or ())
+                         for name, spec in (data.get("linetypes", {})
+                                            .get("patterns") or {}).items()}
+
     for p in data["paths"]:
         if _is_glyph_path(p):
             continue
@@ -386,17 +486,21 @@ def trace_generated(data: dict, dims: dict, out_png: str, cfg: dict,
         if _reads_as_solid(p):
             _draw_solid(t, p, colour)
             continue
+        pattern = linetype_patterns.get(
+            cadkit.dash_linetype_name(cadkit.dash_pattern(p.get("dashes"))), ())
         for it in items:
             kind = it[0]
             if kind == "l":
-                t.line(it[1], it[2], colour, width_mm)
+                t.line(it[1], it[2], colour, width_mm, pattern=pattern)
             elif kind == "re":
                 x0, y0, x1, y1 = it[1]
                 t.polyline([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], colour,
-                           width_mm, closed=True)
+                           width_mm, closed=True, pattern=pattern)
             elif kind == "qu":
-                t.polyline(it[1], colour, width_mm, closed=True)
+                t.polyline(it[1], colour, width_mm, closed=True, pattern=pattern)
             elif kind == "c":
+                # DXF cannot dash a spline, and the generator leaves the curve
+                # undashed as well, so the trace matches the drawing here.
                 t.bezier(it[1], it[2], it[3], it[4], colour, width_mm)
 
     # Text the generator emits, minus the dimension values a live dimension draws.
@@ -433,7 +537,7 @@ def trace_generated(data: dict, dims: dict, out_png: str, cfg: dict,
         offset_pt = (offset_mm / scale) * sign
         lo = a[0] if p["axis"] == "h" else a[1]
         hi = b[0] if p["axis"] == "h" else b[1]
-        t.dimension(p["axis"], lo, hi, p["line_pos"], offset_pt, "green",
+        t.dimension(p["axis"], lo, hi, p["line_pos"], offset_pt, dim_colour,
                     arrow_pt, line_width_mm, p["value"], text_pt, gap_pt)
 
     info = t.save(out_png)

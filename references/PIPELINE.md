@@ -48,18 +48,23 @@ icacls "<dir>" /grant "<DOMAIN\user>:(OI)(CI)M" /T /C
 python scripts/extract.py "$JOB/source.pdf" -o "$JOB/extract.json" [--dpi 150]
 ```
 
-产出三块：
+产出四块：
 
 | 键 | 内容 | 用途 |
 |---|---|---|
-| `paths` | 每条矢量路径：`color`(描边) / `fill`(填充) / `width` / `rect` / `items` | 几何与配色的唯一来源 |
+| `paths` | 每条矢量路径：`color`(描边) / `fill`(填充) / `width` / `rect` / `items` / `dashes` | 几何与配色的唯一来源 |
 | `spans` | 每个文字 span：文字 / bbox / 字号 / 颜色 / 方向 | 重建 TEXT |
-| `raster` | 光栅化后的颜色份额 | 配色的**独立佐证** |
+| `linetypes` | 每种虚线图案：`pattern_pt`（划线/间隔，源图点）与路径数 | 生成器据此定义真 DXF linetype |
+| `raster` | 光栅化后的颜色份额 + 使用的调色板 | 配色的**独立佐证** |
+
+`stats` 里另外三个必须看的数：`dashed_paths`（虚线路径数）、`linetype_counts`、
+`colours_outside_named_set`（六色之外的颜色，会被写成真彩色）。
 
 **先读输出的"颜色组合统计"**，确认每种颜色的角色。特别注意：
 
 - `stroke=none fill=X` 的路径是"只有填充"的形状
 - `width=0` 的路径是零宽描边（PDF 里常见）
+- `dashes` 是**字符串**（`"[ 6 3 ] 0"`），实线是 `"[] 0"`，无描边是 `None`
 
 **不要**假设"描边色就是可见色"——有的 PDF 有不可见文本层（`3 Tr`）。
 
@@ -68,26 +73,49 @@ python scripts/extract.py "$JOB/source.pdf" -o "$JOB/extract.json" [--dpi 150]
 ## 3. 标注推断（`infer_dims.py`）
 
 ```bash
-python scripts/infer_dims.py "$JOB/extract.json" -o "$JOB/dims.json"
+python scripts/infer_dims.py "$JOB/extract.json" -o "$JOB/dims.json" \
+    [--config cad-reproduce.yaml] [--colour green] [--allow-empty]
 ```
 
-### 判据（全部来自源图实测）
+### 第一步：确认颜色角色
+
+脚本**自动检测**哪种颜色承担尺寸机构，并把全部候选的证据表打印出来
+（箭头数 / 被界线夹住的尺寸线条数 / 同色数字标签数 / 得分）。三种结局：
+
+| 结局 | 表现 | 处置 |
+|---|---|---|
+| 你要的角色成立 | 打印 `(confirmed by the geometry)` | 继续 |
+| 你要的角色不成立 | **退出码 2**，报"the dimension colour role is wrong" | 改 `--colour` 或 yaml 的 `dimensions.colour` |
+| 没有任何角色成立 | 提示"这张图看起来没有尺寸"，退出码 0 | 确实没有尺寸；加 `--allow-empty` 消掉提示 |
+| 几何区分不出角色（单色图纸常见） | 照常推理，同时打印 ambiguous 的原因 | 保险起见把答案写进 yaml |
+
+**注意**：数字标签的颜色**不是**判断依据——标签是文本，文本颜色与它标注的线
+没有必然关系。本图纸 25 个尺寸数字的文本 span 是黑色，导致 black 的证据反而更强。
+所以检测判据用"箭头"和"被界线夹住的尺寸线"。
+
+### 判据（全部来自源图实测，全部可在 yaml 里改）
 
 | 概念 | 判据 |
 |---|---|
 | 尺寸线 | **某个颜色的**长直线段（默认绿色，实测本图纸绿色才是尺寸线） |
-| 界线 | 与尺寸线**垂直**的短线段 |
+| 界线 | 与尺寸线**垂直**的短线段（`ext_min_len_pt` 以上） |
 | 特征位置 | 界线**远离尺寸线的那一端**（决定偏移方向与符号） |
 | 一条链的切分 | 同一直线上共线线段之间的**箭头间隙** |
 | 数值归属 | 数字标签**最近的**那一段（唯一归属，不能共享） |
+| 箭头 | 小实心形状：item 数 + 外接框（默认 6 个 item、5.4×1.32pt） |
+| 数值标签 | 纯数字且字号 ≥ `label_min_size_pt`（把标题栏字段排除掉） |
 
 ### 输出
 
 `proposals[]` 每项含 `axis` / `p1` / `p2` / `line_pos` / `offset_sign` / `value` /
-`label_bbox` / `confidence` / `notes`。
+`label_bbox` / `confidence` / `notes`；顶层含 `dimension_colour` 与 `colour_check`
+（检测结论、证据表、是否 ambiguous）。
 
 **只保留 high 与 medium**；low 的记录在案但不画。若某个标注是你预期的却落到 low，
 看 `notes` 里的原因（缺标签 / 缺一端界线 / 多候选标签）。
+
+**没有任何 high/medium 时会失败**（退出码 2），除非 `--allow-empty`。
+这是故意的：0 个标注以前看起来和"这张图没有尺寸"一模一样。
 
 ---
 
@@ -141,8 +169,13 @@ d.render()                  # 必须！否则没有几何块
 python scripts/trace.py "$JOB/extract.json" --dims "$JOB/dims.json" \
     --out-dir "$JOB/trace" --dpi 300
 python scripts/compare.py "$JOB/trace/trace_source.png" "$JOB/trace/trace_generated.png" \
-    -o "$JOB/out" --dpi 300 --band-mm 0.12 --json "$JOB/cmp.json"
+    -o "$JOB/out" --dpi 300 --band-mm 0.12 --json "$JOB/cmp.json" \
+    --extract "$JOB/extract.json"
 ```
+
+`--extract` 让颜色分类用**源图自己的调色板**（`cadkit.raster_palette`）而不是固定
+八色。不加它，源图里六色之外的颜色会被归到最近的邻近色，颜色份额与 IoU 衡量的
+就是调色板而不是图纸。
 
 ### 为什么用自建 tracer 而不是库渲染器
 
@@ -154,7 +187,17 @@ python scripts/compare.py "$JOB/trace/trace_source.png" "$JOB/trace/trace_genera
 | 中文字形 | ❌ 空方块 | ✅ | ⚠️ 近似 |
 
 **关键**：tracer 用**同一个**光栅化器画源几何和成品几何，所以线宽语义天然一致，
-差异必然来自图纸本身。
+差异必然来自图纸本身。虚线同理：两侧都按 `extract.json` 的 linetype 表画。
+
+### 门禁的能力边界（必须知道）
+
+源侧影像**不是 PDF 渲染**，而是拿 `extract.json` 自己画的；而且 `_reads_as_solid()`
+在 `trace.py` 与 `stage1_build.py` 里是**同一套判据的两份拷贝**。
+→ 实心判错、尺寸裁剪判错这类**系统性错误两边会一起犯，一致率照样 PASS**。
+门禁能证明的是"生成器没有漏画、没有错位"；**不能**证明"抽取与判读是对的"。
+
+因此换新图纸时：门禁通过 ≠ 图纸对。至少另做一次独立对照
+（AutoCAD `--export` 出图看字体/填充/实心、人工确认颜色角色与虚线表）。
 
 ### 判据与阈值
 
@@ -215,3 +258,11 @@ python scripts/accad.py "$JOB/repro.dxf" -o "$JOB/acad" \
 | accoreconsole 挂起 | 提示应答错、或 UTF-8 脚本 | 用 `-EXPORT`；脚本存 GBK；加超时 |
 | 出图 PDF 内容被裁 | `-EXPORT` 按视口裁 | 正常现象；像素比对改用 tracer |
 | 构建失败但下游用了旧文件 | 失败没让下游失效 | 构建前删目标文件；门禁前检查 mtime |
+| **虚线画成实线** | `dashes` 抽了但生成器没读；或它本来就是 `"[] 0"` | 查 `extract.json` 的 `linetypes`；生成器侧看 `build.json` 的 `linetypes.defined` |
+| **虚线长度不对** | DXF 线型首元素是总长，被当成第一段虚线；或漏了 pt→mm 换算 | 读回 DXF，断言 group 49 的元素个数与毫米长度 |
+| **蓝线变黑线 / 颜色整体偏** | 颜色被量化到六个名字里 | 查 `stats.colours_outside_named_set`；调色板外必须写真彩色 |
+| **门禁报告一个奇怪的邻近色** | `compare.py` 没传 `--extract`，用了固定八色调色板 | 加 `--extract "$JOB/extract.json"` |
+| **尺寸一个都没推断出来** | 颜色角色不对（旧版会静默返回 0） | 看 `infer_dims` 打印的证据表；把答案写进 `dimensions.colour` |
+| `infer_dims` 退出码 2 | 角色不对，或没有任何 high/medium 标注 | 按 stderr 的提示改 `--colour` / yaml；确实无尺寸时用 `--allow-empty` |
+| 虚线圆弧仍是实线 | DXF 样条曲线不支持线型 | 已知限制；看 `build.json` 的 `dashed_curve_not_dashed` |
+| 门禁 PASS 但图纸明显不对 | 门禁与被测对象共模（见第 5 节"能力边界"） | 用 AutoCAD `--export` 出图独立核对；新图纸必须另做一次对照 |

@@ -52,8 +52,29 @@ LAYER_FOR = {
     "cyan": ("HATCH_CYAN", 4),
     "magenta": ("MARK_MAGENTA", 6),
 }
+# A colour outside those six is not one of them and must not be painted as one.
+# It keeps its exact value on a layer of its own, named after that value, and is
+# written as a true colour (group code 420).  The earlier behaviour - `stroke or
+# fill or "black"` against a six-entry table - turned every blue line on the sheet
+# black with no warning, which is a wrong drawing that also cannot pass a colour
+# check no matter how many times it is iterated.
+TRUECOLOUR_LAYER = ("TRUECOLOUR", 7)
 TEXT_LAYER = ("TEXT", 250)
 DIM_LAYER = ("DIMENSION", 3)
+
+
+def layer_for_colour(key: str) -> tuple:
+    """(layer name, aci, true_rgb or None) for one colour key."""
+    if key in LAYER_FOR:
+        name, aci = LAYER_FOR[key]
+        return name, aci, None
+    if key.startswith("#") and len(key) == 7:
+        try:
+            rgb = cadkit.hex_to_rgb(key)
+        except ValueError:
+            return TRUECOLOUR_LAYER[0], TRUECOLOUR_LAYER[1], None
+        return f"TRUECOLOUR_{key[1:]}", TRUECOLOUR_LAYER[1], rgb
+    return TRUECOLOUR_LAYER[0], TRUECOLOUR_LAYER[1], None
 
 
 def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
@@ -124,6 +145,12 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
     # 3.25 pt gives dimgap ~ 0.5 pt.  The earlier 2.75 pt held every number roughly 2 pt
     # - about a quarter of its own height - too far from its dimension line.
     gap_pt = float(cfg.get("dim_text_gap_pt") or 0.5)
+    # The colour of the dimension machinery, as detected from (or configured for)
+    # the source.  It is green on some sheets and something else on others; using
+    # the detected role instead of the literal 3 keeps the DIMENSION entities on the
+    # same colour the source drew them in.
+    dim_colour_key = (dims.get("dimension_colour") or cfg.get("dim_colour") or "green")
+    dim_aci = cadkit.key_to_aci(dim_colour_key) or 3
     dimstyle = doc.dimstyles.add(dim_style_name)
     dimstyle.dxf.dimtxsty = style_name
     dimstyle.dxf.dimtxt = round(text_pt * scale, 4)
@@ -147,17 +174,53 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
     dimstyle.dxf.dimjust = 0
     dimstyle.dxf.dimtih = 0                          # keep text horizontal, not aligned
     dimstyle.dxf.dimtoh = 0
-    dimstyle.dxf.dimclrd = 3
-    dimstyle.dxf.dimclre = 3
-    dimstyle.dxf.dimclrt = 3
+    dimstyle.dxf.dimclrd = dim_aci
+    dimstyle.dxf.dimclre = dim_aci
+    dimstyle.dxf.dimclrt = dim_aci
+
+    # ---- linetypes -------------------------------------------------------
+    # Dash patterns measured in the source, one DXF linetype each.  Without this
+    # every centre line, hidden line and section boundary comes out solid: the dash
+    # array was read into extract.json and then never used, and the self-check
+    # could not see the loss because its own rasteriser ignored dashes too.
+    linetype_names = {}
+    for name, spec in (data.get("linetypes", {}).get("patterns") or {}).items():
+        pattern = spec.get("pattern_pt") or []
+        if not pattern or name == "CONTINUOUS":
+            continue
+        # AutoCAD stores the TOTAL pattern length as the first element, so the first
+        # dash value would otherwise be swallowed as the length and every linetype
+        # would come out with one element instead of two.  The lengths are converted
+        # from source points to millimetres by the same factor the geometry uses.
+        gp = [round((-v if i % 2 else v) * scale, 4) for i, v in enumerate(pattern)]
+        used = gp if len(gp) > 2 else [abs(gp[0]) + abs(gp[1])] + gp
+        doc.linetypes.add(name, pattern=used,
+                          description="source PDF dash array "
+                                      + " ".join("%g" % v for v in pattern) + " pt")
+        linetype_names[tuple(spec["pattern_pt"])] = name
 
     # ---- layers ----------------------------------------------------------
-    used_layers = set()
-    for key, (name, aci) in LAYER_FOR.items():
-        doc.layers.add(name, color=aci)
-        used_layers.add(key)
+    # A layer is created the first time something needs it, carrying the colour of
+    # what goes on it.  The colour a layer carries is only a hint (every entity also
+    # sets its own colour), but a layer whose colour contradicts its contents is a
+    # trap for whoever opens the file.
+    layer_specs = {}
     doc.layers.add(TEXT_LAYER[0], color=TEXT_LAYER[1])
-    doc.layers.add(DIM_LAYER[0], color=DIM_LAYER[1])
+    doc.layers.add(DIM_LAYER[0], color=dim_aci)
+
+    def register_layer(key: str) -> str:
+        """Create the layer for a colour key if it does not exist yet; return its name."""
+        name, aci, rgb = layer_for_colour(key)
+        if name in layer_specs:
+            return name
+        layer_specs[name] = ({"color": aci, "true_color": cadkit.rgb_int(rgb)}
+                             if rgb else {"color": aci})
+        try:
+            doc.layers.add(name, **layer_specs[name])
+        except Exception as exc:                       # pragma: no cover
+            raise RuntimeError(
+                f"could not create layer {name!r} for colour {key!r}: {exc}") from exc
+        return name
 
     msp = doc.modelspace()
 
@@ -234,10 +297,11 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
     counts = collections.Counter()
     suppressed = collections.Counter()
     lw_sub = collections.Counter()
+    true_colour_entities = collections.Counter()
 
     def layer_and_colour(stroke, fill):
         key = stroke or fill or "black"
-        return LAYER_FOR[key][0], key
+        return register_layer(key), key
 
     for p in data["paths"]:
         stroke, fill = p["color"], p["fill"]
@@ -260,11 +324,21 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
         attr = {"layer": layer}
         color_attr, _rec = cadkit.color_attrs(colour, cfg.get("color_policy", "exact"))
         attr.update(color_attr)
+        if _rec.get("mode", "").startswith("true"):
+            true_colour_entities[colour] += 1
         width_mm = (p["width"] or 0.0) * cadkit.PT2MM
         chosen, requested = cadkit.snap_lineweight(width_mm)
         if requested is not None:
             lw_sub[(requested, chosen)] += 1
         attr["lineweight"] = chosen
+
+        # The dash pattern of this path, as a real DXF linetype.  A spline is the
+        # one entity DXF cannot dash, so a dashed curve keeps its geometry and loses
+        # its dashes; that loss is recorded in the build report rather than hidden.
+        ltype = linetype_names.get(cadkit.dash_pattern(p.get("dashes")))
+        if ltype:
+            attr["linetype"] = ltype
+            counts[f"dashed:{ltype}"] += 1
 
         # 3. SOLID SHAPES.  The source has no stroke-less filled path at all - the
         #    only fill-only paths are the 82 numeral outlines.  Its solid marks are
@@ -301,7 +375,10 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
                 counts["quad"] += 1
             elif kind == "c":
                 bez = Bezier([(X(px), Y(py)) for px, py in item[1:5]])
-                msp.add_open_spline(bez.control_points, degree=3, dxfattribs=attr)
+                spline_attr = {k: v for k, v in attr.items() if k != "linetype"}
+                if "linetype" in attr:
+                    counts["dashed_curve_not_dashed"] += 1
+                msp.add_open_spline(bez.control_points, degree=3, dxfattribs=spline_attr)
                 counts["curve"] += 1
             else:
                 counts[f"skipped:{kind}"] += 1
@@ -376,8 +453,11 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
         x0, y0, x1, y1 = span["bbox"]
         height = round(span["size"] * scale, 4)
         vertical = abs(span["dir"][1]) > 0.5
-        attr = {"layer": TEXT_LAYER[0], "style": style_name}
         colour = _span_colour(span)
+        # Text goes on the layer for its own colour, not on one shared TEXT layer.
+        # A span whose colour is outside the named six then needs no substitution
+        # either, which is the whole point: the sheet keeps the colours it has.
+        attr = {"layer": register_layer(colour), "style": style_name}
         color_attr, _rec = cadkit.color_attrs(colour, cfg.get("color_policy", "exact"))
         attr.update(color_attr)
 
@@ -420,7 +500,16 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
             "name": dim_style_name, "text_height_mm": dimstyle.dxf.dimtxt,
             "arrow_size_mm": dimstyle.dxf.dimasz, "gap_mm": dimstyle.dxf.dimgap,
             "text_style": style_name, "font": style_font,
+            "colour": dim_colour_key, "aci": dim_aci,
         },
+        "linetypes": {
+            "defined": sorted(n for n in linetype_names.values()),
+            "source_patterns_pt": {n: s["pattern_pt"]
+                                   for n, s in (data.get("linetypes", {})
+                                                .get("patterns") or {}).items()},
+        },
+        "layers": sorted(layer_specs),
+        "true_colour_entities": true_colour_entities,
     }
     return report
 

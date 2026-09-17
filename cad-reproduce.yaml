@@ -65,7 +65,50 @@ dim_style_font: "SimSun"
 #            otherwise fall back to a true colour value (group code 420).
 #   aci    - always snap to the nearest ACI index.
 #   true   - always write true colour.
+#
+# `exact` is the default because it is the only one that never changes a colour.
+# A colour outside the six named ones keeps its exact value as a true colour; it is
+# never replaced by the nearest named colour, which is what an earlier version did
+# silently (blue became black, and #1E90FF became cyan).
 color_policy: "exact"
+
+# Dimension inference tunables.  Every value here is a MEASUREMENT taken from the
+# reference sheet, and every one of them is a property of a DRAWING rather than of
+# this pipeline - so on a second drawing these are what has to change.  It is
+# better for them to be visible here than to be literals inside infer_dims.py.
+#
+# `colour` is which colour carries the dimension machinery (dimension lines,
+# extension lines, arrowheads).  On the reference sheet it is green and red is
+# centre lines, the opposite of the usual convention.  Leave it as it is and the
+# drawing is measured; when the detection cannot settle the roles it says so, and
+# this is where the answer goes.  `infer_dims.py --colour X` overrides it for one run.
+dimensions:
+  colour: "green"
+  # An arrowhead is a small filled shape with this many path items and this
+  # bounding box, in source points (long x short).
+  arrow_items: 6
+  arrow_long_pt: [4.5, 6.5]
+  arrow_short_pt: [0.8, 2.0]
+  # A dimension value is a bare number at least this tall.  The floor is what
+  # separates a value from a title-block field, which is also a bare number.
+  label_min_size_pt: 5.2
+  # Two segments are collinear within this distance; an arrowhead leaves a gap no
+  # wider than this in the dimension line; anything shorter is not a dimension line.
+  tol_collinear_pt: 0.35
+  max_arrow_gap_pt: 6.0
+  min_run_pt: 3.0
+  # An extension line is at least this long, and its end lies within this distance of
+  # the dimension line's end.
+  ext_min_len_pt: 2.0
+  ext_near_pt: 1.2
+  # How far a value label may sit from its dimension line, across and along it.
+  label_max_offset_pt: 16.0
+  label_max_along_pt: 25.0
+
+# How far past the feature a live DIMENSION's extension lines are placed, in
+# millimetres of the generated drawing.  (The source's own drawn dimensions carry a
+# measured 1.25 pt of extension beyond the dimension line, in dimstyle dimexe.)
+dim_extension_mm: 4.0
 
 # Refuse to write the drawing unless every source path has been reproduced.
 strict: true

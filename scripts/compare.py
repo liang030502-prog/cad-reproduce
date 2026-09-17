@@ -38,21 +38,24 @@ def _load_rgb(path: str):
         return np.asarray(im.convert("RGB"), dtype=np.uint8)
 
 
-def _classify(rgb):
+def _classify(rgb, palette=None):
     """(family_index, ink_mask, shares) using the shared raster classifier.
 
     Sharing the classifier with the extraction stage matters: if the two stages
     bucketed pixels differently, a colour difference between them would be an
-    artifact of the bucketing rather than a fact about the drawings.
+    artifact of the bucketing rather than a fact about the drawings.  The palette
+    comes from the source's own colours where one is supplied, so a sheet drawn in
+    a colour outside the default eight is still classified exactly.
     """
     import numpy as np
-    family, ink = cadkit.classify_raster(rgb)
+    family, ink = cadkit.classify_raster(rgb, palette)
     total = int(ink.sum())
+    names = [n for n, _rgb in palette] if palette else list(cadkit.RASTER_FAMILIES)
     if total == 0:
         return family, ink, {}
-    counts = np.bincount(family[ink].ravel(), minlength=len(cadkit.RASTER_FAMILIES))
-    shares = {cadkit.RASTER_FAMILIES[i]: round(float(counts[i]) / total, 6)
-              for i in range(1, len(cadkit.RASTER_FAMILIES)) if counts[i]}
+    counts = np.bincount(family[ink].ravel(), minlength=len(names))
+    shares = {names[i]: round(float(counts[i]) / total, 6)
+              for i in range(1, len(names)) if counts[i]}
     return family, ink, shares
 
 
@@ -60,7 +63,8 @@ def compare(source_png: str, dxf_png: str, out_dir: str,
             dpi: int | None = None,
             tolerance: float = 0.03, band_mm: float = 0.12,
             min_geometric_agreement: float = 0.97,
-            min_colour_iou: float = 0.70) -> dict:
+            min_colour_iou: float = 0.70,
+            palette=None) -> dict:
     import numpy as np
     from PIL import Image
 
@@ -83,8 +87,8 @@ def compare(source_png: str, dxf_png: str, out_dir: str,
     # if flipping the source matches the drawing better than not flipping it, the
     # two rasters are not in the same space and every number below would be about
     # a mirrored drawing.
-    _s_fam, s_ink = cadkit.classify_raster(src)
-    _g_fam, g_ink = cadkit.classify_raster(gen)
+    _s_fam, s_ink = cadkit.classify_raster(src, palette)
+    _g_fam, g_ink = cadkit.classify_raster(gen, palette)
     _same = float((s_ink & g_ink).sum()) / max(1, int((s_ink | g_ink).sum()))
     _flip = float((np.flipud(s_ink) & g_ink).sum()) / max(1, int((np.flipud(s_ink) | g_ink).sum()))
     orientation = {
@@ -99,8 +103,8 @@ def compare(source_png: str, dxf_png: str, out_dir: str,
             f"not in the same coordinate space, so no comparison is valid")
 
     h, w, _ = gen.shape
-    src_family, src_mask, src_shares = _classify(src)
-    gen_family, gen_mask, gen_shares = _classify(gen)
+    src_family, src_mask, src_shares = _classify(src, palette)
+    gen_family, gen_mask, gen_shares = _classify(gen, palette)
     src_ink = int(src_mask.sum())
     gen_ink = int(gen_mask.sum())
 
@@ -184,8 +188,9 @@ def compare(source_png: str, dxf_png: str, out_dir: str,
     # A colour-level defect is more useful than a pixel-level one: it says which
     # colour is in the wrong place.  Comparing family indices rather than RGB
     # keeps anti-aliased edges from counting as disagreement.
+    palette_names = [n for n, _rgb in palette] if palette else list(cadkit.RASTER_FAMILIES)
     colour_confusion = {}
-    for idx, fam in enumerate(cadkit.RASTER_FAMILIES):
+    for idx, fam in enumerate(palette_names):
         if idx == 0:
             continue
         src_fam = (src_family == idx) & gen_mask
@@ -284,12 +289,22 @@ def main() -> int:
                     help="minimum fraction of ink that must land inside the band")
     ap.add_argument("--min-colour-iou", type=float, default=0.70,
                     help="minimum placement IoU per colour")
+    ap.add_argument("--extract", dest="extract_json",
+                    help="extract.json, to classify colours against the SOURCE's own "
+                         "palette instead of the default eight (recommended: without it "
+                         "a colour outside those eight is reported as its nearest "
+                         "neighbour and the colour gate measures the palette, not the drawing)")
     args = ap.parse_args()
+
+    palette = None
+    if args.extract_json:
+        with open(args.extract_json, encoding="utf-8") as fh:
+            palette = cadkit.raster_palette(json.load(fh))
 
     report = compare(args.source_png, args.dxf_png, args.out_dir,
                      dpi=args.dpi, tolerance=args.tolerance, band_mm=args.band_mm,
                      min_geometric_agreement=args.min_agreement,
-                     min_colour_iou=args.min_colour_iou)
+                     min_colour_iou=args.min_colour_iou, palette=palette)
 
     cadkit.banner("SELF-CHECK")
     cadkit.table(

@@ -1,0 +1,71 @@
+# AutoCAD installation directory (contains accoreconsole.exe and acad.exe)
+acad_home: "D:\\AutoCAD 2021"
+
+# Source drawing to reproduce
+source: ""
+
+# Where generated drawings and reports go
+out_dir: ""
+
+# Millimetres per point.  1 pt = 1/72 inch = 25.4/72 mm.
+# This fixed constant is what makes a generated DXF print at exactly the same
+# size as the source PDF.  Do NOT substitute a "true scale factor" here: the
+# geometry must first be reproduced at the source's own printed size, and any
+# scale recovery happens on top of that as an explicit, reported step.
+scale_mm_per_pt: 0.35277777777777775
+
+# Where the source sheet's ink starts, measured in source points as
+# (x0, y0, x1, y1).  Leave empty to derive from the source content extents.
+# Set it explicitly when the sheet must land on an exact paper size (e.g. A4).
+origin_pt: null
+
+# Target sheet size in mm.  null keeps the sheet at exactly the source size,
+# which is the default because it is the only choice that guarantees the
+# generated plot is pixel-for-pixel comparable with the source.
+sheet_mm: null
+
+# Text style used for text copied from the source.
+#
+# ezdxf (and therefore the render used for self-checking) resolves a style's
+# `font` as a font FAMILY NAME, not a file name: "SimSun" resolves, "simsun.ttc"
+# does NOT, and an unresolved name silently falls back to `fallback_font`, which
+# has no CJK glyphs.  A silent fallback renders Chinese as empty boxes, so the
+# build refuses to run when a style name does not resolve.
+#
+# The source PDF sets every span in SimSun, so SimSun is the default here: using
+# it makes the generated text the same weight and shape as the source.  An SHX
+# stroke font is bolder than the source's filled glyphs, which shows up as text
+# carrying several times the source's ink.
+style_name: "HZ"
+style_font: "SimSun"
+
+# Fallback font when a style name does not resolve.  Named explicitly rather than
+# left to the library default so a missing font is a visible, configurable choice.
+fallback_font: "SimSun"
+
+# Optional SHX alternative for the Chinese style, for deliveries that must open
+# with a specific SHX font.  `txt.shx` + bigfont `gbcbig.shx` is the pair that
+# was verified to display Chinese correctly in AutoCAD 2021 on this machine.
+# Leave either empty to disable.  Text produced this way is BOLDER than the
+# source and will widen the ink comparison, so do not enable it while iterating
+# on fidelity.
+style_shx: ""
+style_bigfont: ""
+
+# Text style used for numeric dimension values.  The source sets these in SimSun,
+# a filled TrueType face; an SHX stroke font is what makes dimension numerals
+# look like they were "drawn with lines" rather than typed.  A bare number is
+# recognised by its content (digits and at most one decimal point), never by a
+# size threshold, so a small note is never mistaken for a dimension.
+dim_style_name: "DIM"
+dim_style_font: "SimSun"
+
+# Colour policy:
+#   exact  - use the ACI index when it reproduces the source RGB exactly,
+#            otherwise fall back to a true colour value (group code 420).
+#   aci    - always snap to the nearest ACI index.
+#   true   - always write true colour.
+color_policy: "exact"
+
+# Refuse to write the drawing unless every source path has been reproduced.
+strict: true

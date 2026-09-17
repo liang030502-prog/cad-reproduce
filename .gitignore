@@ -1,0 +1,34 @@
+# Python bytecode / caches — machine-specific, never useful in a repo
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Per-job outputs — these are produced by running the pipeline, not source
+jobs/
+*.dxf
+*.dwg
+*.pdf
+!references/*.pdf
+
+# AutoCAD / pipeline scratch
+plot.log
+*.scr.log
+_audit.scr
+_export.scr
+_convert.scr
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

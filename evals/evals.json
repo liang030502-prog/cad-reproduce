@@ -1,0 +1,104 @@
+{
+  "skill": "cad-reproduce",
+  "note": "触发用例检验 description 是否能被路由到；质量用例检验产出的图纸是否真的合格。触发用例里 should_trigger=false 的用例同样重要——它们防止 skill 抢别的任务的活。",
+  "trigger_cases": [
+    {
+      "id": "t01",
+      "prompt": "照着这张 PDF 工程图画一份 CAD 图，要能编辑的",
+      "should_trigger": true,
+      "why": "典型说法：照 PDF 画 CAD + 要可编辑"
+    },
+    {
+      "id": "t02",
+      "prompt": "把 蓄热式燃烧器安装图.pdf 复刻成 DXF",
+      "should_trigger": true,
+      "why": "复刻 + 明确的输出格式"
+    },
+    {
+      "id": "t03",
+      "prompt": "上次那个图颜色不对，实心红点画成空心的了，标注也是手画的线不是标注",
+      "should_trigger": true,
+      "why": "description 里明确列了这些抱怨说法"
+    },
+    {
+      "id": "t04",
+      "prompt": "帮我按原图重新画一遍，要跟 PDF 一模一样",
+      "should_trigger": true,
+      "why": "按原图重画 + 要求一致"
+    },
+    {
+      "id": "t05",
+      "prompt": "这个 dwg 帮我转成 dxf",
+      "should_trigger": false,
+      "why": "纯格式转换——反例里写明了不适用，用 accad.py --dwg 即可"
+    },
+    {
+      "id": "t06",
+      "prompt": "帮我设计一个法兰盘的三视图",
+      "should_trigger": false,
+      "why": "从零设计，没有源图可复刻"
+    },
+    {
+      "id": "t07",
+      "prompt": "这张图纸照片能转成 CAD 吗",
+      "should_trigger": false,
+      "why": "位图输入，本流程依赖 PDF 矢量数据；应先说明这是另一件事"
+    },
+    {
+      "id": "t08",
+      "prompt": "画个简单的示意图给我看看方案",
+      "should_trigger": false,
+      "why": "不要求与源图一致，属于普通绘图"
+    }
+  ],
+  "quality_cases": [
+    {
+      "id": "q01",
+      "name": "四项原生实体都在",
+      "check": "生成的 DXF 内 entity type 计数满足：HATCH > 0 且 pattern_name 全为 SOLID；DIMENSION > 0 且每个都有非空 geometry 块名；TEXT 或 MTEXT > 0；图层色为精确 ACI（黑=250 而非 7）。",
+      "why": "用户在意的正是这四项；缺一项就是回到'冒充'"
+    },
+    {
+      "id": "q02",
+      "name": "AutoCAD 能原生加载",
+      "check": "accad.py --audit 返回 ok=true、entities>0、无 ACAD_PROXY_ENTITY；extents 与源图内容范围一致（±0.5mm）。",
+      "why": "文件能被 AutoCAD 认可才算交付物"
+    },
+    {
+      "id": "q03",
+      "name": "字体无替换",
+      "check": "accad.py --export 出的 PDF，get_fonts() 不含替换字体（如 simplex/txt），且 get_text() 能取出源图的中文标题。",
+      "why": "字体静默回退会让中文变豆腐块，只有查 PDF 才发现"
+    },
+    {
+      "id": "q04",
+      "name": "数值与原图一致",
+      "check": "每个 DIMENSION 的文字参数等于源图对应标注的数值，数量一致。",
+      "why": "原图比例可能自相矛盾，此时活标注自动测量会给出与源图不同的数字"
+    },
+    {
+      "id": "q05",
+      "name": "门禁三项通过",
+      "check": "compare.py 在 trace 出的两张图上：几何一致率 ≥0.97、每色份额差 ≤0.03、每色 IoU ≥0.70。",
+      "why": "这是'像不像'唯一可量化的判据"
+    },
+    {
+      "id": "q06",
+      "name": "不重复绘制",
+      "check": "被 DIMENSION 取代的尺寸几何确实被抑制：源图绿色尺寸线段数与成品中残存的绿色线段数之和，与 DIMENSION 数量相称；差异图里不应出现同一尺寸的双影。",
+      "why": "抑制区间做宽了会误删（丢图框），做窄了会重复画"
+    },
+    {
+      "id": "q07",
+      "name": "实心形状是真的实心",
+      "check": "源图里'笔宽 ≥ 形状半宽'的路径，在成品中都有对应 HATCH（SOLID）；且退化碎片（<3 顶点或单方向无面积）没有被误判成实心。",
+      "why": "这是用户第一条抱怨的根因"
+    },
+    {
+      "id": "q08",
+      "name": "失败时如实报错",
+      "check": "门禁不通过时脚本以非零码退出并打印未匹配像素的 bbox；构建失败时不留下一个'看起来成功'的旧 DXF。",
+      "why": "静默成功是最危险的失败模式——实测踩过一次（构建失败后旧 DXF 被复用）"
+    }
+  ]
+}

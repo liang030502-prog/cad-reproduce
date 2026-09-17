@@ -35,6 +35,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cadkit  # noqa: E402
+import curve_entities  # noqa: E402
 import infer_dims  # noqa: E402
 
 # Source colours.  All six are exactly representable in the ACI palette, which was
@@ -300,11 +301,43 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
                                    close=True, dxfattribs=attr)
                 counts["quad"] += 1
             elif kind == "c":
-                bez = Bezier([(X(px), Y(py)) for px, py in item[1:5]])
-                msp.add_open_spline(bez.control_points, degree=3, dxfattribs=attr)
-                counts["curve"] += 1
+                # Handled after this loop: a curve has to be judged as part of a RUN
+                # of curves, not item by item.  See the curve block below.
+                pass
             else:
                 counts[f"skipped:{kind}"] += 1
+
+        # ---- curves ---------------------------------------------------------
+        # A PDF has no arc primitive.  Its content stream has only move/line/curve/
+        # rectangle/close, so every circle and every arc in it is written as cubic
+        # Beziers - a full circle is usually four, one per quadrant.  Emitting those
+        # Beziers one at a time as splines means a single drawn arc becomes several
+        # unrelated entities that CAD cannot select, dimension or edit as one curve.
+        #
+        # curve_entities looks at the run as a whole and decides, from a measured
+        # residual, whether it is a circular arc.  If it is, the drawing gets a real
+        # ARC or CIRCLE - the entity the original draughtsman would have used.  If it
+        # is not, the run is kept as a SPLINE built from the source control points,
+        # which is exact: a chain of N cubic Beziers is reproduced by one degree-3
+        # spline to 1e-13 pt, passing through every junction.
+        #
+        # The run ends wherever a non-curve item intervenes, so curves are never
+        # joined across other geometry.
+        curve_runs = []
+        prev_was_curve = False
+        for item in items:
+            if item[0] == "c":
+                cubic = curve_entities.item_cubic(item)
+                if prev_was_curve:
+                    curve_runs[-1].append(cubic)
+                else:
+                    curve_runs.append([cubic])
+                prev_was_curve = True
+            else:
+                prev_was_curve = False
+
+        for cubics in curve_runs:
+            curve_entities.emit_curves(msp, cubics, attr, X, Y, scale, counts)
 
     # ---- live dimensions -------------------------------------------------
     # `associative` decides where the number comes from, and the choice is forced by

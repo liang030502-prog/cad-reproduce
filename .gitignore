@@ -18,6 +18,10 @@ jobs/
 *.dwg
 *.pdf
 !references/*.pdf
+# One real drawing IS tracked: the regression suite is far more convincing against a
+# sheet the pipeline did not grow up on than against a synthetic one, and this is a
+# 96 kB vector PDF with no raster data in it.
+!evals/fixtures/*.pdf
 
 # AutoCAD / pipeline scratch
 plot.log

@@ -425,18 +425,23 @@ def build(data: dict, dims: dict, out_dxf: str, cfg: dict,
     # `associative` decides where the number comes from, and the choice is forced by
     # the source drawing rather than by preference.
     #
-    # A live dimension measures the geometry it is attached to.  Measured on this
-    # sheet, the ratio between each printed value and the length actually drawn for
-    # it ranges from 0.59 to 7.58 - the drawing claims 1:15 in its title block but is
-    # plotted at roughly 1:50.6, and several of its dimensions do not agree with
-    # their own geometry at all.  So "let CAD measure it" and "print the number the
-    # source prints" cannot both hold: on this drawing they are different numbers.
+    # A live dimension measures the geometry it is attached to, so in associative mode
+    # CAD prints ITS measurement.  Whether that equals the value the source prints
+    # depends on whether the sheet is drawn to a consistent scale.
     #
-    # Default: draw the dimension with CAD's own machinery - extension lines,
-    # dimension line, arrowheads and text all produced by the DIMENSION entity - and
-    # set the value to the source's, so the sheet reads as the source reads.
-    # Switch to associative mode once a drawing's geometry and its numbers agree, and
-    # CAD then measures and maintains the value itself.
+    # Re-measured on the reference sheet, it largely is: of its 24 usable dimensions,
+    # 22 sit in clusters at value/length ratios of about 17.9, 14.9 and 20.7 (one
+    # cluster per view, i.e. per plot scale) and only 2 are outliers.  An earlier
+    # version of this comment claimed a spread of 0.59 to 7.58 across the whole sheet
+    # and blamed the source drawing for it; that number came from an earlier
+    # inference and is wrong - see references/PITFALLS.md item 47.  A second sheet
+    # (1:20 steelwork) does NOT hold one scale: 6 clusters, spread over 31.8x.
+    #
+    # So the default stays the safe one: draw the dimension with CAD's own machinery -
+    # extension lines, dimension line, arrowheads and text all produced by the
+    # DIMENSION entity - and set the value to the source's, so the sheet reads as the
+    # source reads.  `dims.json`'s ratio_clusters is what tells you whether a given
+    # drawing could instead be associative, and which of its dimensions contradict it.
     dims_emitted = 0
     dim_failures = []
     for p in kept_dims:

@@ -25,6 +25,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cadkit  # noqa: E402
 
+#: The name a solid path gets.  Compared against, never re-typed: writing the string
+#: out here is how `dashed_paths` came to report EVERY path as dashed on the steel
+#: sheet - the comparison used a lower-case literal while the table is keyed by
+#: `dash_linetype_name()`, which returns upper case, so the equality never held and
+#: the count silently counted everything.  Reading the name from the function that
+#: produces it makes the two impossible to disagree.
+CONTINUOUS = cadkit.dash_linetype_name(())
+
 
 def extract(source: str, dpi: int = 150, max_paths: int | None = None) -> dict:
     import pymupdf
@@ -116,7 +124,7 @@ def extract(source: str, dpi: int = 150, max_paths: int | None = None) -> dict:
             "colour_combo_counts": _combo_counts(paths),
             "width_counts": dict(collections.Counter(p["width"] for p in paths)),
             "dashed_paths": sum(n for k, n in linetypes["counts"].items()
-                                if k != "continuous"),
+                                if k != CONTINUOUS),
             "linetype_counts": linetypes["counts"],
             "colours_outside_named_set": _unnamed_colours(paths, spans),
         },
@@ -241,7 +249,7 @@ def main() -> int:
     cadkit.table([(k, v) for k, v in data["stats"]["colour_combo_counts"].items()],
                  ("stroke / fill / width combination", "paths"))
     print()
-    cadkit.table([(k if k != "continuous" else "(solid)", v)
+    cadkit.table([(k if k != CONTINUOUS else "(solid)", v)
                   for k, v in data["stats"]["linetype_counts"].items()],
                  ("linetype (dash pattern, points)", "paths"))
     print()

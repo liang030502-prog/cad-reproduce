@@ -62,22 +62,45 @@ def _famkey(name):
 # success, which is the worst of both worlds: a wrong drawing and a clean report.
 DEFAULT_DIM_COLOUR = "green"
 
-# Arrowhead signature: a small filled shape of exactly six line items.  Both the
-# item count and the size window are measured from the source (5.4 x 1.32 pt here),
-# and both are overridable, because another sheet's arrows are another size.
+# Arrowhead signature: a small filled shape of a few line items.  The item count and
+# the size window below are measured from the reference sheet (6 items, 5.4 x 1.32 pt).
+#
+# They are only a DEFAULT.  Measured on a second real sheet - a steelwork drawing
+# plotted at 1:20 instead of 1:15 - the arrowheads are 2.76 x 0.72 pt, which is
+# OUTSIDE the window above in both dimensions, so the matcher found ZERO arrows
+# there.  With no arrows the dimension chain cannot be cut at its boundaries, and
+# 110 of that sheet's 126 spans came out with no value attached.  "Configurable" is
+# not the same as "works": a threshold that has to be re-typed per drawing is a
+# threshold that will be wrong on the next one.  See `adaptive_arrows`.
 DEFAULT_ARROW_ITEMS = 6
 DEFAULT_ARROW_LONG_PT = (4.5, 6.5)
 DEFAULT_ARROW_SHORT_PT = (0.8, 2.0)
+
+# How the adaptive search bounds itself, as RATIOS of the sheet's own measured value.
+# The relationship that makes this work: an arrowhead's length tracks the sheet's
+# dimension text height.  Measured, long/text = 0.983 on the reference sheet and
+# 0.527 on the steel sheet - different by a factor of 1.87, in the same direction as
+# their plot scales (1:15 against 1:20).  The aspect ratio is NOT constant (4.09
+# against 3.83), which is why the search below clusters on SIZE and then confirms
+# with geometry, rather than testing a formula.
+ADAPTIVE_SIZE_TOL = 0.45      # arrow length within +/-45 % of the text height
+ADAPTIVE_MAX_ASPECT = 8.0     # longer than this is a hatch sliver, not an arrowhead
+ADAPTIVE_MIN_ASPECT = 1.6     # rounder than this is a dot or a glyph
+ADAPTIVE_ON_LINE_TOL = 1.5    # pt, how close an arrow must sit to its dimension line
+ADAPTIVE_MIN_SCORE = 3        # arrows required before the adaptive set is believed
 
 
 def dim_defaults() -> dict:
     """The tunables of this stage, with the values measured on the reference sheet.
 
     Every one of them can be overridden from `cad-reproduce.yaml` or from the
-    command line, so a second drawing is a configuration change rather than a code
-    change.  The values are measurements, not preferences: the arrow window comes
-    from the arrowheads' own bounding boxes, and the label size floor from the
+    command line.  The values are measurements, not preferences: the arrow window
+    comes from the arrowheads' own bounding boxes, and the label size floor from the
     height of the sheet's dimension text.
+
+    `arrow_items` is the one that travels between drawings: measured 6 on both
+    sheets available, and it is a property of how the drawing was produced (a filled
+    arrow polygon) rather than of how big it was plotted.
     """
     return {
         "colour": DEFAULT_DIM_COLOUR,
@@ -126,8 +149,11 @@ def collect_arrows(data: dict, colour: str = DEFAULT_DIM_COLOUR,
     signature, so it is applied first.
 
     The signature is data, not a literal: a sheet whose arrows are a different size
-    or a different item count gets its own values through `settings`, and when the
-    signature matches nothing the report says so instead of quietly falling back.
+    or a different item count gets its own values through `settings`.  When those
+    configured bounds match nothing, the search retries with bounds MEASURED from the
+    sheet (see `adaptive_arrows`) and records that it did so, because a configured
+    window that silently matches nothing is the failure this whole stage exists to
+    avoid.
     """
     s = _settings(settings)
     lo_l, hi_l = s["arrow_long_pt"]
@@ -144,6 +170,128 @@ def collect_arrows(data: dict, colour: str = DEFAULT_DIM_COLOUR,
         arrows.append({"cx": (x0 + x1) / 2.0, "cy": (y0 + y1) / 2.0,
                        "w": w, "h": h, "rect": [x0, y0, x1, y1]})
     return arrows
+
+
+def sheet_label_size(data: dict, settings: dict | None = None) -> float | None:
+    """The sheet's dimension text height, measured from the numbers on it.
+
+    Uses the LARGEST common numeric size rather than the first or the mean: a title
+    block also carries numbers (part numbers, weights), and they are drawn smaller
+    than the dimension values on every sheet seen so far.  Measured, the reference
+    sheet has 25 labels at 5.49 pt and 3 at 5.01; the steel sheet has 9 at 5.24 and
+    15 at 3.4-3.8, all of the small ones in material tables.
+
+    This is the anchor the arrow search scales against, so it must come from the
+    drawing.  Reading it from the config would move the calibration problem one
+    level up instead of removing it.
+    """
+    s = _settings(settings)
+    sizes = [L["size"] for L in numeric_labels(data, min_size=s["label_min_size_pt"])]
+    if not sizes:
+        return None
+    counts = collections.Counter(round(v, 2) for v in sizes)
+    top = max(counts.values())
+    # Among sizes that are within one label of the most common, take the largest -
+    # anti-aliasing splits what is really one size across neighbouring values, and a
+    # title block's numbers are strictly smaller.
+    return max(v for v, n in counts.items() if n >= max(1, top - 1))
+
+
+def adaptive_arrows(data: dict, colour: str, settings: dict | None = None) -> dict:
+    """Find the arrowheads by measuring them, when the configured window finds none.
+
+    Two things are known about a dimension arrowhead and neither depends on plot
+    scale: it is a small filled shape, and it sits ON a dimension line of the same
+    colour.  So the search is
+
+      1. collect filled shapes of `arrow_items` items of this colour that are
+         elongated (aspect between ADAPTIVE_MIN_ASPECT and ADAPTIVE_MAX_ASPECT) and
+         no longer than the sheet's text height times (1 + ADAPTIVE_SIZE_TOL);
+      2. group them by bounding box, since every arrowhead of one drawing shares it;
+      3. keep the groups that actually sit on a long run of the colour.
+
+    Step 3 is what makes it safe.  On the steel sheet there are 44 shapes at
+    2.76 x 0.72, 20 at 2.88 x 0.72 and 14 at 3.36 x 1.08, plus 60-odd short-ish
+    hatch and weld marks of 18-21 items; requiring the shape to lie on a dimension
+    line and to touch it at its end is what separates the 6-item arrows from the
+    rest.  Measured, the reference sheet's own 5.4 x 1.32 arrows also satisfy every
+    step, so the same code path finds them - the configured window is simply tried
+    first because it is cheaper and it is what the config says to trust.
+    """
+    s = _settings(settings)
+    text = sheet_label_size(data, settings)
+    if not text:
+        return {"arrows": [], "reason": "no numeric label to measure the sheet's text "
+                                        "height against", "text_height_pt": None}
+
+    horizontal, vertical = collect_segments(data, colour)
+    runs = ([("h", r) for r in group_runs(horizontal, s["max_arrow_gap_pt"])]
+            + [("v", r) for r in group_runs(vertical, s["max_arrow_gap_pt"])])
+    runs = [r for r in runs if r[1]["b"] - r[1]["a"] >= s["min_run_pt"]]
+
+    limit = text * (1.0 + ADAPTIVE_SIZE_TOL)
+    groups = collections.defaultdict(list)
+    for p in data["paths"]:
+        if p["fill"] != colour or len(p["items"]) != s["arrow_items"]:
+            continue
+        x0, y0, x1, y1 = p["rect"]
+        w, h = x1 - x0, y1 - y0
+        long_, short = max(w, h), min(w, h)
+        if short <= 0 or long_ > limit:
+            continue
+        aspect = long_ / short
+        if not (ADAPTIVE_MIN_ASPECT <= aspect <= ADAPTIVE_MAX_ASPECT):
+            continue
+        groups[(round(long_, 2), round(short, 2))].append(
+            {"cx": (x0 + x1) / 2.0, "cy": (y0 + y1) / 2.0,
+             "w": w, "h": h, "rect": [x0, y0, x1, y1]})
+
+    best = {"arrows": [], "score": 0, "size": None, "candidates": len(groups)}
+    for size, members in groups.items():
+        long_, short = size
+        on_line = []
+        for a in members:
+            for axis, run in runs:
+                pos = a["cy"] if axis == "h" else a["cx"]
+                along = a["cx"] if axis == "h" else a["cy"]
+                if abs(pos - run["pos"]) <= max(ADAPTIVE_ON_LINE_TOL, short) \
+                        and run["a"] - long_ <= along <= run["b"] + long_:
+                    on_line.append(a)
+                    break
+        if len(on_line) > best["score"]:
+            best = {"arrows": on_line, "score": len(on_line), "size": size,
+                    "candidates": len(groups)}
+
+    ok = best["score"] >= ADAPTIVE_MIN_SCORE
+    return {
+        "arrows": best["arrows"] if ok else [],
+        "score": best["score"],
+        "size_pt": best["size"],
+        "text_height_pt": text,
+        "candidates": len(groups),
+        "reason": (f"measured {best['score']} arrowheads at "
+                   f"{best['size'][0]} x {best['size'][1]} pt on {best['candidates']} "
+                   f"candidate size(s), against this sheet's {text:.2f} pt dimension text"
+                   if ok else
+                   f"no arrowhead size carried {ADAPTIVE_MIN_SCORE} or more shapes on a "
+                   f"dimension line ({best['candidates']} candidate size(s) seen, best "
+                   f"had {best['score']})"),
+    }
+
+
+def arrows_for(data: dict, colour: str, settings: dict | None = None) -> list:
+    """Arrowheads for one colour: the configured signature first, measurement second.
+
+    The order matters.  The configured window is what the caller asked for and what
+    the build report should reflect, so it wins when it matches anything at all.  It
+    is only when it matches NOTHING that the sheet is measured - because that is the
+    case where the configured numbers are wrong for this drawing, and returning an
+    empty list there is what silently disabled the whole dimension chain.
+    """
+    configured = collect_arrows(data, colour, settings=settings)
+    if configured:
+        return configured
+    return adaptive_arrows(data, colour, settings)["arrows"]
 
 
 def collect_segments(data: dict, colour: str = "green"):
@@ -268,7 +416,13 @@ def dim_colour_candidates(data: dict, settings: dict | None = None) -> dict:
     out = {}
     for key in set(by_colour) | {L["colour"] for L in labels}:
         counts = dict(by_colour.get(key, {}))
-        counts["arrows"] = len(collect_arrows(data, key, settings=s))
+        # Only the colour that could plausibly carry dimensions is worth the adaptive
+        # search: it walks the paths and groups runs, and doing that for every colour
+        # on the sheet costs more than it can return.
+        if counts.get("h_runs", 0) + counts.get("v_runs", 0) >= 2:
+            counts["arrows"] = len(arrows_for(data, key, settings))
+        else:
+            counts["arrows"] = 0
         counts["value_labels"] = sum(1 for L in labels if L["colour"] == key)
         # A value label is text, so its colour says nothing about which machinery it
         # belongs to; it is evidence that SOME dimension exists nearby, not that this
@@ -353,11 +507,17 @@ def verify_dim_colour(data: dict, colour: str, settings: dict | None = None) -> 
     """
     s = _settings(settings)
     horizontal, vertical = collect_segments(data, colour)
-    arrows = collect_arrows(data, colour, settings=s)
+    arrows = arrows_for(data, colour, settings)
     labels = numeric_labels(data, min_size=s["label_min_size_pt"])
     labels_here = [L for L in labels if L["colour"] == colour]
     evidence = {"h_segments": len(horizontal), "v_segments": len(vertical),
                 "arrows": len(arrows), "value_labels": len(labels_here)}
+    if not collect_arrows(data, colour, settings=s) and arrows:
+        adaptive = adaptive_arrows(data, colour, settings)
+        evidence["arrows_measured"] = adaptive["size_pt"]
+        evidence["arrows_note"] = adaptive["reason"]
+        cadkit.eprint(f"note: the configured arrow window matched nothing in "
+                      f"{colour!r}; {adaptive['reason']}")
     detection = detect_dim_colour(data, settings)
     dimension_like = detection.get("dimension_like") or []
     return {
@@ -472,8 +632,20 @@ def infer(data: dict, chain_map: dict | None = None,
     )
 
     horizontal, vertical = collect_segments(data, used)
-    arrows = collect_arrows(data, used, settings=s)
+    arrows = arrows_for(data, used, settings)
     labels = numeric_labels(data, min_size=s["label_min_size_pt"])
+    # Say where the arrow signature came from, because "the config said so" and "this
+    # sheet was measured" are different claims and a reader has to be able to tell
+    # them apart when the numbers look wrong.
+    if collect_arrows(data, used, settings=s):
+        arrow_source = "configured signature matched"
+    elif arrows:
+        adaptive = adaptive_arrows(data, used, settings)
+        arrow_source = (f"measured on this sheet: {adaptive['size_pt'][0]} x "
+                        f"{adaptive['size_pt'][1]} pt ({adaptive['score']} of them, "
+                        f"text height {adaptive['text_height_pt']:.2f} pt)")
+    else:
+        arrow_source = "none found: " + adaptive_arrows(data, used, settings)["reason"]
 
     # Dimension lines are the long runs of that colour; extension lines are the short
     # perpendicular ones.  Length alone separates them in this drawing, and the
@@ -618,11 +790,16 @@ def infer(data: dict, chain_map: dict | None = None,
         p["label_bbox"] = label["bbox"]
         p["label_vertical"] = label["vertical"]
 
+    # Where the sheet's own scale lives, and which dimensions disagree with it.  Run
+    # last, on the finished proposals, so it sees the values the report will carry.
+    ratios = ratio_clusters(proposals)
+
     return {
         "proposals": proposals,
         "ambiguities": ambiguities,
         "dimension_colour": used,
         "colour_check": colour_check,
+        "ratio_clusters": ratios,
         "inputs": {
             f"{used}_horizontal_segments": len(horizontal),
             f"{used}_vertical_segments": len(vertical),
@@ -644,7 +821,79 @@ def infer(data: dict, chain_map: dict | None = None,
             "arrow_signature": {"items": s["arrow_items"],
                                 "long_pt": s["arrow_long_pt"],
                                 "short_pt": s["arrow_short_pt"]},
+            "arrow_signature_source": arrow_source,
         },
+    }
+
+
+def ratio_clusters(proposals: list, tolerance: float = 0.10) -> dict:
+    """Group dimensions by their value-to-drawn-length ratio, and name the outliers.
+
+    This ratio is `value / length_pt`, so it is "millimetres of real size per point
+    of paper" - a drawing scale, per view.  Clustering it answers two questions a
+    reader cannot answer by eye:
+
+    * what scale does this sheet actually hold itself to, per axis?  Measured on the
+      reference sheet, 21 of its 24 usable dimensions sit at 14.9-21.5 (one cluster
+      near 17.86 horizontally and one near 14.88 vertically, which are the two views'
+      scales), so the sheet is internally consistent to about 1.4x - NOT the 0.59 to
+      7.58 spread an earlier version of the docs reported, which was an artefact of an
+      earlier inference.  Measured on the steel sheet, 9 dimensions fall into 6
+      clusters spread over 31.8x: there is no dominant scale there.
+    * which individual dimensions contradict the sheet's own scale?  A dimension whose
+      ratio is far from every cluster is either a misread value, a label attached to
+      the wrong span, or a feature the author measured differently - all three are
+      things a human has to look at, and none of them are visible in a per-dimension
+      confidence number.
+
+    Descriptive only: it labels proposals and reports the clusters.  It deliberately
+    does not drop or re-rank anything, because a scale outlier can be a perfectly
+    correct dimension of a differently-scaled detail view.
+    """
+    ratios = []
+    for i, p in enumerate(proposals):
+        try:
+            value = float(p["value"])
+        except (TypeError, ValueError):
+            continue
+        if p["length_pt"] > 0 and value > 0:
+            ratios.append((value / p["length_pt"], i))
+
+    clusters = []          # [[lo, hi, [indices]], ...]
+    for ratio, i in sorted(ratios):
+        for c in clusters:
+            if abs(ratio - (c[0] + c[1]) / 2.0) / ((c[0] + c[1]) / 2.0) <= tolerance:
+                c[0], c[1] = min(c[0], ratio), max(c[1], ratio)
+                c[2].append(i)
+                break
+        else:
+            clusters.append([ratio, ratio, [i]])
+
+    for c in clusters:
+        member = [ratios[j][0] for j in range(len(ratios)) if ratios[j][1] in c[2]]
+        c.append(sum(member) / len(member))                    # centre
+
+    for ratio, i in ratios:
+        home = max((c for c in clusters if i in c[2]),
+                   key=lambda c: len(c[2]), default=None)
+        if home is None or len(home[2]) < 2:
+            proposals[i]["ratio_checked"] = False
+            proposals[i]["notes"].append(
+                "its value/length ratio is unlike any other dimension on this sheet")
+        elif abs(ratio - home[3]) / home[3] > tolerance:
+            proposals[i]["ratio_checked"] = False
+            proposals[i]["notes"].append(
+                f"its value/length ratio {ratio:.2f} differs from this sheet's "
+                f"{home[3]:.2f} by more than {tolerance:.0%}")
+        else:
+            proposals[i]["ratio_checked"] = True
+        proposals[i]["ratio"] = round(ratio, 4)
+
+    return {
+        "clusters": [{"ratio_centre": round(c[3], 3), "ratio_lo": round(c[0], 3),
+                      "ratio_hi": round(c[1], 3), "dimensions": len(c[2])}
+                     for c in sorted(clusters, key=lambda c: -len(c[2]))],
+        "outliers": sum(1 for p in proposals if p.get("ratio_checked") is False),
     }
 
 

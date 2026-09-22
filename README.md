@@ -97,23 +97,29 @@ python "$SK\accad.py" "$JOB\repro.dxf" -o "$JOB\acad" `
 ### 自检套件（改动脚本后按顺序跑）
 
 ```powershell
-python evals\test_repository.py     # 1. 仓库本身：文档链接、Skill 可加载、无机器/图纸特征串
-python evals\test_regressions.py    # 2. 流水线行为：四类历史缺陷不再复发
-python evals\test_arc_recognition.py # 3. 圆弧识别：真 ARC/CIRCLE 而不是一串 SPLINE
+python evals\test_repository.py       # 1. 仓库本身：文档链接、Skill 可加载、无机器/图纸特征串
+python evals\test_regressions.py      # 2. 流水线行为：四类历史缺陷不再复发（合成 PDF）
+python evals\test_arc_recognition.py  # 3. 圆弧识别：真 ARC/CIRCLE 而不是一串 SPLINE
+python evals\test_steelwork_sheet.py  # 4. 第二张真实图纸：端到端跑通 + 门禁
 ```
 
-**三者全过 = 退出码 0。**
+**四者全过 = 退出码 0。**
 
 - `test_repository.py` 检查的是**仓库这个产物**：SKILL.md 的 frontmatter 能被解析、
   文档里每个文件名引用都存在（防"README 指向已删除的文件"）、没有个人/机器特征串、
   每个被文档点名的脚本都能跑且接受文档里写的参数、**文档承诺的能力在代码里真的有接线**
   （例如虚线必须同时出现在 `extract`/`stage1_build`/`trace` 三处，缺一处就是假的），
-  最后把上面两套行为测试也跑一遍。
+  最后把上面三套行为测试也跑一遍。
 - `test_regressions.py` 造两张最小 PDF 跑通整条流水线，断言四类**门禁看不见**的
   历史缺陷不再复发：虚线进 DXF 成为真 linetype（长度按毫米换算正确）、六色外的颜色
   写真彩色而不是黑、错误的颜色角色退出码 2、追绘的尺寸用检测到的颜色。
 - `test_arc_recognition.py` 断言 PDF 里的三次贝塞尔被识别成真 `ARC`/`CIRCLE`
   （中心、半径、方向都要对），自由曲线仍保持 `SPLINE`，且合并后的样条是精确的。
+- `test_steelwork_sheet.py` 在**一张真正陌生的图**上端到端跑：A3、1:20 的钢结构图
+  （6689 条路径、349 条弧、141 个文字 span、**全实线**、箭头只有参考图的 51% 大）。
+  合成 PDF 是用代码自己的假设造出来的、参考图是假设被调出来的那张，**两者都不是
+  "下一张图"的证据**，所以这一套用真图。它锁住的两个缺陷都只有在这张图上才现形：
+  `dashed_paths` 把每条路径都算成虚线；箭头签名是绝对尺寸，在 1:20 上匹配不到任何箭头。
 
 **为什么仓库也要有测试**：这个仓库已经出过"README 指向已删除文件"、
 "一个新分支合进来把上一个修复静默回退"、"文档承诺虚线圆弧支持而记账代码已被丢掉"

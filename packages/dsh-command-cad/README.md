@@ -4,13 +4,38 @@ A host slash command that drives this repository's pipeline from the DSH Web GUI
 
 ```
 /cad <path-to.pdf>     reproduce it: extract -> dimensions -> DXF -> trace -> gate
-/cad status            reprint the newest job's report, without re-running anything
-/cad test              run the skill's four suites
-/cad help              usage
+/cad                    same, using the attached PDF or the newest PDF in the workspace
+/cad pdf <pdf>          the above, then also try an AutoCAD PDF export
+/cad status             reprint the newest job's report, without re-running anything
+/cad test               run the skill's four self-check suites
+/cad help               usage
 ```
 
 A PDF can also be dropped into the composer and sent with the command, since it declares
 `input.attachments`.
+
+## A sentence is not a subcommand
+
+The first version treated the first word after `/cad` as a verb, so a user who attached a
+drawing and typed what they wanted — `完成并输出为pdf` — got
+`unknown subcommand 完成并输出为pdf`.  That is a refusal to do the obvious thing.
+
+Only these are verbs: `status`, `test`, `help`, `pdf`, `run` (case-insensitive).
+**Anything else is the drawing to reproduce.**  So all of these work:
+
+| what you type | what happens |
+|---|---|
+| `/cad` with a PDF attached | runs on the attachment |
+| `/cad 完成并输出为pdf` with a PDF attached | runs on the attachment; the sentence is ignored |
+| `/cad C:\drawings\beam.pdf` | runs on that file |
+| `/cad run "C:\my drawings\beam.pdf"` | same, quotes and all |
+| `/cad` with no text and no attachment | uses the newest `.pdf` in the workspace, and says it guessed |
+| `/cad 完成并输出为pdf` with nothing attached and no PDF around | asks for a PDF, and explains both ways to give one |
+
+Text is only treated as a path when it actually ends in `.pdf`; a sentence that ends in
+something else is not reported as a missing file.  Quotes *around* a path are removed,
+because that is how a path containing a space gets pasted; quote characters *inside* a
+path are part of the name and stay.
 
 ## Why a command and not a prompt
 

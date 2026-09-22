@@ -84,14 +84,28 @@ color_policy: "exact"
 # this is where the answer goes.  `infer_dims.py --colour X` overrides it for one run.
 dimensions:
   colour: "green"
-  # An arrowhead is a small filled shape with this many path items and this
-  # bounding box, in source points (long x short).
+  # An arrowhead is a small filled shape with this many path items and this bounding
+  # box, in source points (long x short).
+  #
+  # Only `arrow_items` is expected to travel between drawings; it is a property of how
+  # the drawing was produced (a filled arrow polygon), not of how big it was plotted.
+  # The size window is a DEFAULT measured at 1:15, and when it matches nothing the
+  # stage measures the sheet instead and says so in
+  # `dims.json` -> `rules.arrow_signature_source`.  Measured at 1:20: 2.76 x 0.72 pt.
   arrow_items: 6
   arrow_long_pt: [4.5, 6.5]
   arrow_short_pt: [0.8, 2.0]
-  # A dimension value is a bare number at least this tall.  The floor is what
-  # separates a value from a title-block field, which is also a bare number.
+  # A dimension value is a bare number, and this is the floor BELOW which numbers are
+  # not even considered.  It is a default for the same reason as the arrow window: the
+  # reference sheet prints its values at 5.49 pt, and the second sheet puts its main
+  # 26-bay dimension chain at 2.86 pt, where this floor excluded the lot.
+  #
+  # `label_floor_search: true` measures it instead - each size the sheet prints numbers
+  # at is tried, and the one whose labels PAIR with the geometry is kept (measured:
+  # 29 of 43 dimensions in one ratio cluster at 2.86 pt, against 3 of 9 at 5.2 pt).
+  # Set it to false, or pass `infer_dims.py --label-min-size`, to pin this value.
   label_min_size_pt: 5.2
+  label_floor_search: true
   # Two segments are collinear within this distance; an arrowhead leaves a gap no
   # wider than this in the dimension line; anything shorter is not a dimension line.
   tol_collinear_pt: 0.35

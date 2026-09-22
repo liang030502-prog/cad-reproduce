@@ -241,7 +241,7 @@ DOCUMENTED_SCRIPTS = (
     "accad.py",
 )
 DOCUMENTED_FLAGS = {
-    "infer_dims.py": ("--colour", "--allow-empty", "--config"),
+    "infer_dims.py": ("--colour", "--allow-empty", "--config", "--label-min-size"),
     "stage1_build.py": ("--associative", "--mtext", "--no-dimensions",
                         "--min-confidence"),
     "compare.py": ("--extract", "--band-mm", "--min-agreement"),

@@ -89,6 +89,24 @@ ADAPTIVE_MIN_ASPECT = 1.6     # rounder than this is a dot or a glyph
 ADAPTIVE_ON_LINE_TOL = 1.5    # pt, how close an arrow must sit to its dimension line
 ADAPTIVE_MIN_SCORE = 3        # arrows required before the adaptive set is believed
 
+# The value-text size floor is a MEASUREMENT per drawing, exactly like the arrow size,
+# and for the same reason: text is printed at a size that follows the plot scale.  The
+# reference sheet's dimension values are 5.49 pt; the steel sheet's MAIN DIMENSION
+# CHAIN is 2.86 pt, and every one of its 35 labels was excluded by a 5.2 pt floor taken
+# from the other drawing - 26 of them the same repeated `1160`, which is a chain of
+# equal bays if anything ever was.  Measured both ways on the steel sheet:
+#
+#     floor 5.24 / 3.76 / 3.44 ->  9 usable, largest ratio cluster  3 of  9 (33 %)
+#     floor 2.86               -> 43 usable, largest ratio cluster 29 of 43 (67 %), centre 71.45
+#
+# and 71.45 is 1:20 expressed in points of paper, the scale its title block claims.  So
+# the floor is not chosen by size ORDER: on that sheet the largest numeric text
+# (5.24 pt) is a set of weld callouts in a detail view, and "take the biggest" would
+# pick exactly the wrong layer, even though it happens to be right on the reference
+# sheet.  It is chosen by which layer PAIRS with the geometry.  See `search_label_floor`.
+LABEL_FLOOR_CANDIDATE_LIMIT = 8     # distinct numeric sizes worth trying per sheet
+LABEL_FLOOR_MIN_PT = 1.0            # below this a "number" is noise, not annotation
+
 
 def dim_defaults() -> dict:
     """The tunables of this stage, with the values measured on the reference sheet.
@@ -115,6 +133,10 @@ def dim_defaults() -> dict:
         "ext_min_len_pt": EXT_MIN_LEN,
         "label_max_offset_pt": LABEL_MAX_OFFSET,
         "label_max_along_pt": LABEL_MAX_ALONG,
+        # `label_min_size_pt` above is only a default: a second drawing is expected to
+        # contradict it, and `search_label_floor` re-measures it.  Set this to False to
+        # pin the floor and skip the search.
+        "label_floor_search": True,
     }
 
 
@@ -897,6 +919,122 @@ def ratio_clusters(proposals: list, tolerance: float = 0.10) -> dict:
     }
 
 
+def numeric_label_sizes(data: dict) -> list:
+    """Every distinct size at which this sheet prints a bare number, largest first.
+
+    The candidates for the label floor.  Grouped by rounding to 0.01 pt because
+    anti-aliasing spreads what is really one size across neighbouring values; sizes
+    below LABEL_FLOOR_MIN_PT are dropped as noise rather than annotation.
+    """
+    sizes = collections.Counter()
+    for s in data.get("spans", ()):
+        text = s.get("text", "").strip()
+        if text and NUMERIC.match(text) and s.get("size", 0) >= LABEL_FLOOR_MIN_PT:
+            sizes[round(s["size"], 2)] += 1
+    return [size for size, _n in sizes.most_common(LABEL_FLOOR_CANDIDATE_LIMIT)]
+
+
+def _pairing_quality(result: dict) -> dict:
+    """How well this run's labels PAIRED with the geometry, as one number.
+
+    A label layer that really is the dimension values lines up with the drawing: each
+    value divided by the length drawn for it lands on the view's scale, so the ratios
+    form one large cluster.  A layer that is anything else - a material table, weld
+    callouts, title-block fields - gets scattered across spans and forms small ones.
+    Measured, the two layers on the steel sheet separate cleanly: 29 of 43 against 3
+    of 9 - so the count in the largest cluster is a usable score, not a coin flip.
+    """
+    usable = [p for p in result["proposals"] if p["value"] is not None
+              and p["confidence"] in ("high", "medium")]
+    clusters = result.get("ratio_clusters", {}).get("clusters") or []
+    largest = clusters[0]["dimensions"] if clusters else 0
+    consistent = sum(1 for p in usable if p.get("ratio_checked"))
+    return {
+        "usable": len(usable),
+        "largest_cluster": largest,
+        "share": round(largest / len(usable), 4) if usable else 0.0,
+        "consistent": consistent,
+        "clusters": len(clusters),
+        # Ranked by how many labels the geometry CONFIRMS, then by how consistent the
+        # rest are.  Share alone would let a single lucky pairing beat a real chain.
+        "score": largest * 1000 + consistent,
+    }
+
+
+def search_label_floor(data: dict, settings: dict | None = None, **kwargs) -> tuple:
+    """Find which text size on this sheet is the dimension values, by pairing them.
+
+    Returns (result, record).  Every candidate size is tried as the floor; a floor
+    admits its own size and anything larger, so the candidates overlap and the search
+    is over "where does the dimension layer START", which is the question a reader
+    would ask.  The winner is the one whose labels pair with the geometry best.
+
+    On a sheet with a single numeric size the search is a no-op that returns the same
+    result it was given - it cannot make a one-layer drawing worse.  A caller that
+    already knows the answer sets `label_floor_search: false` in the config or passes
+    the floor directly, and then this is never called.
+    """
+    s = _settings(settings)
+    base_floor = s["label_min_size_pt"]
+    candidates = numeric_label_sizes(data)
+    # The configured floor is measured against explicitly.  It is usually NOT one of
+    # the sizes the sheet prints at - the config says 5.2 while the sheet prints at
+    # 5.24 - so comparing against "the nearest candidate" silently compares the winner
+    # with itself, which is how the reason line came to contradict its own table.
+    trials = sorted({base_floor, *candidates})
+    tried = []
+    best = None
+    baseline = None
+    for size in sorted(trials):              # ascending: prefer the more permissive
+        attempt = dict(settings or {})
+        attempt["label_min_size_pt"] = size
+        try:
+            result = infer(data, settings=attempt, **kwargs)
+        except Exception as exc:                       # noqa: BLE001
+            tried.append({"floor_pt": size, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        quality = _pairing_quality(result)
+        tried.append({"floor_pt": size, **quality})
+        if size == base_floor:
+            baseline = quality
+        if best is None or quality["score"] > best[1]["score"]:
+            best = (result, quality, size)
+
+    if best is None:
+        # Every candidate failed, so fall back to the configured floor rather than
+        # failing the stage: an empty report is worse than a configured attempt.
+        result = infer(data, settings=settings, **kwargs)
+        return result, {"chosen_pt": base_floor, "configured_pt": base_floor,
+                        "candidates_tried": tried, "searched": False,
+                        "changed": False, "outcome_changed": False,
+                        "reason": "every candidate size failed; used the configured floor"}
+
+    result, quality, chosen = best
+    outcome_changed = baseline is None or quality["score"] != baseline["score"]
+    against = (f"{baseline['largest_cluster']} of {baseline['usable']} at the "
+               f"configured {base_floor:g} pt" if baseline
+               else f"no candidate succeeded at the configured {base_floor:g} pt")
+    result["label_floor"] = {
+        "chosen_pt": chosen,
+        "configured_pt": base_floor,
+        "searched": True,
+        # `changed` is about the NUMBER, `outcome_changed` is about the RESULT.  On the
+        # reference sheet the search picks 5.01 where the config says 5.2 and every
+        # number in the report is identical - so the configured floor was not wrong
+        # there, and saying it was would be a false alarm in the report a human reads.
+        "changed": chosen != base_floor,
+        "outcome_changed": outcome_changed,
+        "candidates_tried": tried,
+        "reason": (f"the {chosen:g} pt layer paired with the geometry best: "
+                   f"{quality['largest_cluster']} of its {quality['usable']} usable "
+                   f"dimensions land in one ratio cluster "
+                   f"({quality['share']:.0%}), against {against}"
+                   + ("" if outcome_changed else
+                      "; the configured floor gives the same result")),
+    }
+    return result, result["label_floor"]
+
+
 def _score(cands, near_lo, near_hi, bounds, lo, hi):
     """Confidence is a count of independent confirmations, not a feeling.
 
@@ -944,6 +1082,10 @@ def main() -> int:
                     help="exit 0 even when no dimension could be inferred; without this "
                          "an empty result is a failure, because it is indistinguishable "
                          "from a wrong colour role or an unreadable source")
+    ap.add_argument("--label-min-size", type=float,
+                    help="pin the value-text size floor in points and skip the search. "
+                         "Default is to try each size this sheet prints numbers at and "
+                         "keep the one whose labels pair with the geometry")
     args = ap.parse_args()
 
     with open(args.extract_json, encoding="utf-8") as fh:
@@ -956,8 +1098,21 @@ def main() -> int:
 
     # An explicitly requested colour is never silently swapped for another: the
     # caller asked a question and deserves the answer, including "that is wrong".
-    result = infer(data, colour=args.colour, settings=settings,
-                   allow_switch=args.colour is None)
+    infer_kwargs = {"colour": args.colour, "allow_switch": args.colour is None}
+
+    # Which text size on this sheet is the dimension values is measured, not assumed:
+    # a floor taken from another drawing excluded the steel sheet's entire main chain.
+    # An explicit `--label-min-size` or `label_floor_search: false` pins it instead.
+    floor_state = None
+    if args.label_min_size is not None:
+        settings = dict(settings or {})
+        settings["label_min_size_pt"] = args.label_min_size
+        settings["label_floor_search"] = False
+        result = infer(data, settings=settings, **infer_kwargs)
+    elif (settings or {}).get("label_floor_search", True) is False:
+        result = infer(data, settings=settings, **infer_kwargs)
+    else:
+        result, floor_state = search_label_floor(data, settings=settings, **infer_kwargs)
 
     cadkit.ensure_dirs(os.path.dirname(os.path.abspath(args.out)))
     with open(args.out, "w", encoding="utf-8") as fh:
@@ -973,6 +1128,25 @@ def main() -> int:
         verdict = "no dimension-like geometry in this colour"
     print(f"dimension colour : {result['dimension_colour']}  ({verdict})")
     print(f"why              : {check['reason']}")
+    if floor_state:
+        if floor_state.get("outcome_changed"):
+            note = (f"  (MEASURED; the configured "
+                    f"{floor_state['configured_pt']:g} pt would have changed the result)")
+        elif floor_state.get("changed"):
+            note = (f"  (measured; the configured {floor_state['configured_pt']:g} pt "
+                    f"gives the same result)")
+        else:
+            note = "  (the configured floor held)"
+        print(f"label text floor : {floor_state['chosen_pt']:g} pt{note}"
+              f"\n                   {floor_state['reason']}")
+        if floor_state.get("searched"):
+            cadkit.table([(f"{t['floor_pt']:g}", t.get("usable", "-"),
+                           t.get("largest_cluster", "-"),
+                           f"{t.get('share', 0):.0%}" if t.get("usable") else "-",
+                           t.get("consistent", "-"), t.get("error", ""))
+                          for t in floor_state["candidates_tried"]],
+                         ("floor pt", "usable", "largest cluster", "share",
+                          "consistent", "note"))
     print()
     cadkit.table(sorted((k, json.dumps(v) if isinstance(v, dict) else v)
                         for k, v in check["candidates"].items()),

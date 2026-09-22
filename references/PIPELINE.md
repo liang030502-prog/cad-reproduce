@@ -74,7 +74,8 @@ python scripts/extract.py "$JOB/source.pdf" -o "$JOB/extract.json" [--dpi 150]
 
 ```bash
 python scripts/infer_dims.py "$JOB/extract.json" -o "$JOB/dims.json" \
-    [--config cad-reproduce.yaml] [--colour green] [--allow-empty]
+    [--config cad-reproduce.yaml] [--colour green] [--allow-empty] \
+    [--label-min-size 5.2]
 ```
 
 ### 第一步：确认颜色角色
@@ -88,6 +89,35 @@ python scripts/infer_dims.py "$JOB/extract.json" -o "$JOB/dims.json" \
 | 你要的角色不成立 | **退出码 2**，报"the dimension colour role is wrong" | 改 `--colour` 或 yaml 的 `dimensions.colour` |
 | 没有任何角色成立 | 提示"这张图看起来没有尺寸"，退出码 0 | 确实没有尺寸；加 `--allow-empty` 消掉提示 |
 | 几何区分不出角色（单色图纸常见） | 照常推理，同时打印 ambiguous 的原因 | 保险起见把答案写进 yaml |
+
+### 第二步：看尺寸值字号（`label text floor`）
+
+**这是第二张真实图纸才暴露的一步。** 尺寸值的字号跟着绘图比例走，所以它和箭头一样
+是**每张图要重新量的绝对量**：参考图 5.49pt，钢构图的主尺寸链 2.86pt —— 用前者的
+门槛会把后者**整条排除**（实测：9 个标注 vs 43 个）。
+
+脚本默认**逐档试**该图印数字的每个字号，选哪一档的"数值 ÷ 画长"能配成**最大的比例簇**，
+并打印对照表：
+
+```
+label text floor : 2.86 pt  (MEASURED; the configured 5.2 pt would have changed the result)
+floor pt  usable  largest cluster  share  consistent
+2.86      43      29               67%    36
+3.44       9       3               33%     5
+3.76       9       3               33%     5
+5.20       9       3               33%     5
+```
+
+**不要按字号大小猜。** 钢构图有四层数字（2.86 主链 / 3.44 材料表 / 3.76 标题栏 /
+5.24 详图焊缝），最像尺寸值的那层（5.24）**是错的**；参考图上"取最大"恰好对。
+判据只能是配对自洽。
+
+- `changed` = 选中的档 ≠ 配置档；`outcome_changed` = **结果真的不同**。
+  参考图上 `changed=True` 但 `outcome_changed=False`（两种档给同样的 24 个标注），
+  所以报告不会虚报"配置档是错的"。
+- 要钉死：`--label-min-size 5.2` 或 yaml 里 `label_floor_search: false`。
+- 代价：活 DIMENSION 的数值文字由 CAD 摆位，不落在源图 span 原处（实测偏移约 0.5mm）。
+  钢构图 9→43 个标注的代价是几何一致率 0.9944→0.9843，门禁仍通过。
 
 **注意**：数字标签的颜色**不是**判断依据——标签是文本，文本颜色与它标注的线
 没有必然关系。本图纸 25 个尺寸数字的文本 span 是黑色，导致 black 的证据反而更强。

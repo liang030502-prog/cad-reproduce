@@ -165,8 +165,44 @@ def test_dash_accounting(folder: str, data: dict) -> None:
           f"report {syn['stats']['dashed_paths']} vs table {syn_dashed}")
 
 
+def test_label_floor_is_measured(folder: str, dims: dict, data: dict) -> None:
+    print("\n3. the value-text size floor is MEASURED, not inherited")
+    lf = dims.get("label_floor")
+    check("the report says what floor it used", lf is not None)
+    if not lf:
+        return
+    print(f"       chosen {lf['chosen_pt']} pt, configured {lf['configured_pt']} pt, "
+          f"outcome_changed={lf['outcome_changed']}")
+    check("the configured floor was NOT taken on trust here",
+          lf["outcome_changed"] is True, json.dumps(lf, ensure_ascii=False)[:300])
+    check("the stage explains why it chose that floor",
+          "paired with the geometry" in lf["reason"], lf["reason"][:200])
+    check("every candidate size it tried is recorded",
+          len(lf["candidates_tried"]) >= 2, str(lf["candidates_tried"]))
+
+    # The sheet prints numbers at four sizes.  The one that is the dimension values is
+    # the SMALLEST of them, so a rule of "take the largest numeric text" - which is
+    # what the reference sheet would suggest - picks a detail view's weld callouts.
+    sizes = sorted({round(s["size"], 2) for s in data["spans"]
+                    if s["text"].strip().replace(".", "").isdigit()})
+    print(f"       numeric text sizes on this sheet: {sizes}")
+    check("this sheet has more than one numeric text size, so the choice matters",
+          len(sizes) >= 3, str(sizes))
+    check("the chosen floor is NOT the largest numeric text size",
+          abs(lf["chosen_pt"] - max(sizes)) > 0.5,
+          f"chose {lf['chosen_pt']} of {sizes}")
+
+    usable = [p for p in dims["proposals"] if p["value"] is not None
+              and p["confidence"] in ("high", "medium")]
+    check("admitting that layer recovered the main dimension chain",
+          len(usable) >= 35, f"{len(usable)} usable")
+    repeated = [p["value"] for p in usable].count("1160")
+    check("the repeated equal-bay value is among them", repeated >= 20,
+          f"{repeated} dimensions carry the repeated value")
+
+
 def test_adaptive_arrows(folder: str, dims: dict) -> None:
-    print("\n3. the arrowheads are MEASURED when the configured size matches nothing")
+    print("\n5. the arrowheads are MEASURED when the configured size matches nothing")
     source = dims["rules"]["arrow_signature_source"]
     print(f"       signature source: {source}")
     check("the stage says where its arrow signature came from",
@@ -196,7 +232,7 @@ def test_adaptive_arrows(folder: str, dims: dict) -> None:
 
 
 def test_ratio_clusters(folder: str, dims: dict) -> None:
-    print("\n4. the sheet's own scale is reported, and outliers are named")
+    print("\n6. the sheet's own scale is reported, and outliers are named")
     rc = dims.get("ratio_clusters")
     check("ratio clusters are in the report", rc is not None)
     if not rc:
@@ -224,7 +260,7 @@ def test_ratio_clusters(folder: str, dims: dict) -> None:
 
 
 def test_drawing_survives_the_trip(folder: str, build: dict) -> None:
-    print("\n5. the drawing that comes out is complete and editable")
+    print("\n7. the drawing that comes out is complete and editable")
     import collections
     import ezdxf
     doc = ezdxf.readfile(os.path.join(folder, "repro.dxf"))
@@ -236,8 +272,17 @@ def test_drawing_survives_the_trip(folder: str, build: dict) -> None:
           str(types.get("CIRCLE")))
     check("solid marks are real HATCH entities", types.get("HATCH", 0) > 50,
           str(types.get("HATCH")))
-    check("the text is TEXT, not strokes", types.get("TEXT", 0) > 100,
-          str(types.get("TEXT")))
+    # The intent is "the drawing's words are real text, not strokes".  The count of
+    # TEXT entities is not the way to say that, because a dimension value that becomes
+    # a live DIMENSION stops being a TEXT entity - TEXT fell from 132 to 98 when the
+    # measured label floor recovered the main chain and 35 values moved onto their
+    # dimensions.  So the assertion is about the drawing's words as a whole.
+    words = types.get("TEXT", 0) + types.get("MTEXT", 0) + types.get("DIMENSION", 0)
+    check("the drawing's words are text entities, not strokes", words >= 120,
+          f"TEXT {types.get('TEXT', 0)} + MTEXT {types.get('MTEXT', 0)} + "
+          f"DIMENSION {types.get('DIMENSION', 0)} = {words}")
+    check("the main dimension chain became LIVE dimensions, not plain text",
+          types.get("DIMENSION", 0) >= 35, str(types.get("DIMENSION")))
     check("no proxy entities", not [e for e in doc.modelspace()
                                     if e.dxftype() in ("ACAD_PROXY_ENTITY",)])
     check("every source path was accounted for",
@@ -247,7 +292,7 @@ def test_drawing_survives_the_trip(folder: str, build: dict) -> None:
 
 
 def test_gate(folder: str) -> None:
-    print("\n6. the self-check gate passes on this sheet")
+    print("\n8. the self-check gate passes on this sheet")
     trace = os.path.join(folder, "trace")
     out = os.path.join(folder, "out")
     run(os.path.join(SCRIPTS, "trace.py"), os.path.join(folder, "extract.json"),
@@ -263,7 +308,14 @@ def test_gate(folder: str) -> None:
           f"worst colour delta {cmp['worst_colour_delta']}  "
           f"worst colour IoU {cmp['worst_colour_iou']}")
     check("the gate passes", cmp["pass"], json.dumps(cmp["thresholds"]))
-    check("geometry is at least as good as on the reference sheet",
+    # This sheet used to score 0.9944 with only 9 dimensions drawn; recovering the main
+    # chain to 43 costs a little fidelity, because a live DIMENSION places its value
+    # text by its own rules instead of at the source span's position (measured offset
+    # about 0.5 mm).  Both numbers are recorded so the cost of the fix is visible
+    # rather than discovered later as a mystery regression.
+    print(f"       (before this change: 9 dimensions, agreement 0.9944, "
+          f"colour delta 0.0086)")
+    check("geometry stays well above the threshold",
           cmp["geometric_agreement"] >= 0.98, str(cmp["geometric_agreement"]))
     check("no colour was substituted",
           cmp["worst_colour_delta"] <= 0.02, str(cmp["worst_colour_delta"]))
@@ -278,6 +330,7 @@ def main() -> int:
         test_fixture_is_the_real_drawing()
         data, dims, build = stage(folder)
         test_dash_accounting(folder, data)
+        test_label_floor_is_measured(folder, dims, data)
         test_adaptive_arrows(folder, dims)
         test_ratio_clusters(folder, dims)
         test_drawing_survives_the_trip(folder, build)

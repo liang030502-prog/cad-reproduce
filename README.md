@@ -101,9 +101,25 @@ python evals\test_repository.py       # 1. 仓库本身：文档链接、Skill �
 python evals\test_regressions.py      # 2. 流水线行为：四类历史缺陷不再复发（合成 PDF）
 python evals\test_arc_recognition.py  # 3. 圆弧识别：真 ARC/CIRCLE 而不是一串 SPLINE
 python evals\test_steelwork_sheet.py  # 4. 第二张真实图纸：端到端跑通 + 门禁
+node packages\dsh-command-cad\test\run.mjs   # 5. `/cad` 命令本身
 ```
 
-**四者全过 = 退出码 0。**
+**五者全过 = 退出码 0。**
+
+### 在 DSH Web GUI 里当命令用
+
+`packages/dsh-command-cad/` 是一个 DSH 宿主命令插件，把整条流水线包成 `/cad`：
+
+```
+/cad <路径.pdf>    复刻：extract → 尺寸推断 → DXF → trace → 自检门禁
+/cad status        只重印最近一次作业的报告，不重跑
+/cad test          跑上面四个套件
+/cad help          用法
+```
+
+也可在输入框里**直接附上 PDF** 再发 `/cad`（命令声明了 `input.attachments`）。
+命令**不产生模型消息、不耗 token** —— 流水线是确定性的，交给模型只会更慢更贵。
+装法见 `packages/dsh-command-cad/README.md`。
 
 - `test_repository.py` 检查的是**仓库这个产物**：SKILL.md 的 frontmatter 能被解析、
   文档里每个文件名引用都存在（防"README 指向已删除的文件"）、没有个人/机器特征串、

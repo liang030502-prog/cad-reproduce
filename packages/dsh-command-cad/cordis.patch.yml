@@ -1,0 +1,8 @@
+# This bundle's patch layer: one row, inserted over the profile root.
+#
+# The patch is a top-level YAML array of loader patch entries. `insert:` adds rows; a
+# profile's own cordis.patch.yml and the home layer are applied after every bundle layer,
+# so a user can retarget or disable this row by its id without editing this file.
+- insert:
+    - id: command-cad
+      name: 'dsh-command-cad'
